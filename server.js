@@ -1,7 +1,3 @@
-const express = require('express');
-const cors = require('cors');
-require('dotenv').config();
-
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
 
@@ -9,7 +5,7 @@ const app = express();
 
 // Middleware
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    origin: true, // Allow any origin to connect (solves Cloudflare to Render blocks)
     credentials: true,
 }));
 app.use(express.json());

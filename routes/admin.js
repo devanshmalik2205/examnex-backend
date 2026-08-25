@@ -2,25 +2,36 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
 
-// GET /api/admin/timetables
-// Fetches the list of all available timetables (Batches, Streams, Semesters)
-router.get('/timetables', async (req, res) => {
+// GET /api/admin/stats
+// Fetches real statistics for the Quick Overview dashboard
+router.get('/stats', async (req, res) => {
     try {
-        const query = `
-            SELECT id, batch_year, stream, semester, source_sheet 
-            FROM timetables 
-            ORDER BY batch_year DESC, stream ASC;
-        `;
-        const { rows } = await db.query(query);
-        res.json(rows);
+        const examsResult = await db.query('SELECT COUNT(DISTINCT course_id) as total FROM timetable_entries');
+        const studentsResult = await db.query('SELECT COUNT(*) as total FROM students');
+        const roomsResult = await db.query('SELECT COUNT(DISTINCT room) as total FROM timetable_entries WHERE room IS NOT NULL');
+        
+        // Simple clash detection: same room, same day, overlapping times
+        const clashesResult = await db.query(`
+            SELECT COUNT(*) as total 
+            FROM timetable_entries t1
+            JOIN timetable_entries t2 ON t1.room = t2.room AND t1.day_of_week = t2.day_of_week AND t1.id != t2.id
+            WHERE t1.start_time < t2.end_time AND t1.end_time > t2.start_time
+        `);
+
+        res.json({
+            total_exams: parseInt(examsResult.rows[0].total) || 0,
+            total_students: parseInt(studentsResult.rows[0].total) || 0,
+            total_rooms: parseInt(roomsResult.rows[0].total) || 0,
+            conflicts: Math.floor((parseInt(clashesResult.rows[0].total) || 0) / 2)
+        });
     } catch (err) {
-        console.error('Error fetching timetables:', err);
+        console.error('Error fetching stats:', err);
         res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
-// GET /api/admin/timetables/:id
-// Fetches entries, course details, associated teachers, and enrolled students
+// GET /api/admin/timetables
+// Fetches the list of all available timetables (Batches, Streams, Semesters)
 router.get('/timetables/:id', async (req, res) => {
     const timetableId = req.params.id;
 
