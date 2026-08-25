@@ -57,7 +57,7 @@ router.get('/timetables/:id', async (req, res) => {
         const entriesQuery = `
             SELECT 
                 te.id AS entry_id, te.day_of_week, te.start_time, te.end_time, te.room, te.entry_type, te.raw_entry,
-                c.id AS course_id, c.course_code, c.course_title, c.course_type, c.credits,
+                c.id AS course_id, c.course_code, c.abbreviation, c.course_title, c.category, c.sub_category, c.credits, c.ldp, c.course_type,
                 (
                     SELECT json_agg(json_build_object(
                         'id', t.id, 
