@@ -1,21 +1,23 @@
 const { Pool } = require('pg');
 require('dotenv').config();
 
-// Initialize the connection pool using the connection string from neon
+// Initialize the Neon Database connection pool
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false // Required for Neon DB hosted instances
-    }
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false // Required for Neon
+  }
 });
 
-// Test the connection
-pool.connect((err, client, release) => {
-    if (err) {
-        return console.error('Error acquiring client for database connection:', err.stack);
-    }
-    console.log('Successfully connected to the PostgreSQL database on Neon.');
-    release(); // Release the client back to the pool
+pool.on('connect', () => {
+  console.log('Connected to Neon PostgreSQL Database');
 });
 
-module.exports = pool;
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle client', err);
+  process.exit(-1);
+});
+
+module.exports = {
+  query: (text, params) => pool.query(text, params),
+};
