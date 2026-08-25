@@ -32,6 +32,23 @@ router.get('/stats', async (req, res) => {
 
 // GET /api/admin/timetables
 // Fetches the list of all available timetables (Batches, Streams, Semesters)
+router.get('/timetables', async (req, res) => {
+    try {
+        const query = `
+            SELECT id, batch_year, stream, semester, source_sheet 
+            FROM timetables 
+            ORDER BY batch_year DESC, stream ASC;
+        `;
+        const { rows } = await db.query(query);
+        res.json(rows);
+    } catch (err) {
+        console.error('Error fetching timetables:', err);
+        res.status(500).json({ message: 'Internal Server Error' });
+    }
+});
+
+// GET /api/admin/timetables/:id
+// Fetches entries, course details, associated teachers, and enrolled students
 router.get('/timetables/:id', async (req, res) => {
     const timetableId = req.params.id;
 
