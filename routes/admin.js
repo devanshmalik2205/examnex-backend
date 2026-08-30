@@ -65,9 +65,9 @@ router.get('/timetables/:id', async (req, res) => {
                         'email', t.email,
                         'type', t.teacher_type
                     ))
-                    FROM course_teachers ct
-                    JOIN teachers t ON ct.teacher_id = t.id
-                    WHERE ct.course_id = c.id
+                    FROM timetable_course_teachers tct
+                    JOIN teachers t ON tct.teacher_id = t.id
+                    WHERE tct.course_id = c.id AND tct.timetable_id = $1
                 ) AS teachers
             FROM timetable_entries te
             LEFT JOIN courses c ON te.course_id = c.id
