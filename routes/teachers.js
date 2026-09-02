@@ -1,6 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
+const multer = require('multer');
+const xlsx = require('xlsx');
+
+// Use memory storage for processing the file immediately
+const upload = multer({ storage: multer.memoryStorage() });
 
 // GET all teachers
 router.get('/', async (req, res) => {
@@ -67,8 +72,6 @@ router.delete('/:id', async (req, res) => {
 router.get('/:id/allocations', async (req, res) => {
     const { id } = req.params;
     try {
-        // Fetch all courses and timetables (sections) the teacher is allocated to
-        // Fixed schema mismatch: Using course_title instead of course_name, and constructing timetable name.
         const { rows } = await db.query(`
             SELECT 
                 tct.course_id, 
@@ -91,18 +94,15 @@ router.get('/:id/allocations', async (req, res) => {
 // POST (Update) allocations for a teacher
 router.post('/:id/allocations', async (req, res) => {
     const { id } = req.params;
-    const { allocations } = req.body; // Array of { course_id, timetable_id }
+    const { allocations } = req.body; 
 
     try {
         await db.query('BEGIN');
         
-        // 1. Remove existing allocations for this teacher
         await db.query('DELETE FROM timetable_course_teachers WHERE teacher_id = $1', [id]);
 
-        // 2. Insert new allocations
         if (allocations && allocations.length > 0) {
             for (let alloc of allocations) {
-                // Ensure we don't insert empty/invalid rows
                 if (alloc.course_id && alloc.timetable_id) {
                     await db.query(
                         'INSERT INTO timetable_course_teachers (teacher_id, course_id, timetable_id) VALUES ($1, $2, $3)',
@@ -121,13 +121,10 @@ router.post('/:id/allocations', async (req, res) => {
     }
 });
 
-// GET dropdown data for allocations (Courses and Sections/Timetables)
+// GET dropdown data for allocations
 router.get('/data/options', async (req, res) => {
     try {
-        // Using course_title instead of course_name based on DB schema
         const courses = await db.query('SELECT id, course_title, course_code FROM courses ORDER BY course_title ASC');
-        
-        // Constructing a readable name for timetables since they lack a direct 'name' column
         const timetables = await db.query(`
             SELECT id, CONCAT(stream, ' - Sem ', semester, ' (', batch_year, ')') as name 
             FROM timetables 
@@ -141,6 +138,98 @@ router.get('/data/options', async (req, res) => {
     } catch (err) {
         console.error('Error fetching options:', err);
         res.status(500).json({ error: 'Server error fetching allocation options' });
+    }
+});
+
+// POST /api/admin/teachers/upload-preview
+// Handles Excel file upload, parses it, and returns a preview of changes
+router.post('/upload-preview', upload.single('file'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No Excel file provided' });
+
+    try {
+        // Fetch existing teachers to calculate overwrites
+        const existingRes = await db.query('SELECT email FROM teachers');
+        const existingEmails = new Set(existingRes.rows.map(r => r.email));
+
+        // Parse Excel from memory buffer
+        const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
+        const sheetName = workbook.SheetNames[0];
+        const rawData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+        const parsedTeachers = new Map();
+        let totalUpdates = 0;
+
+        rawData.forEach(row => {
+            const fName = (row.FacultyName || row.Name || row.Teacher || row.Faculty || '')?.toString().trim();
+            const fEmail = (row.FacultyEmail || row.Email || '')?.toString().trim();
+            const fType = (row.Type || row.TeacherType || 'Faculty')?.toString().trim();
+
+            if (!fName || !fEmail) return; 
+
+            const isUpdate = existingEmails.has(fEmail);
+            if (isUpdate && !parsedTeachers.has(fEmail)) {
+                totalUpdates++;
+            }
+
+            parsedTeachers.set(fEmail, {
+                full_name: fName,
+                email: fEmail,
+                teacher_type: fType,
+                is_update: isUpdate
+            });
+        });
+
+        res.json({
+            overwrites: {
+                total_updates: totalUpdates
+            },
+            preview: {
+                teachers: Array.from(parsedTeachers.values())
+            }
+        });
+    } catch (err) {
+        console.error('Error parsing Excel:', err);
+        res.status(500).json({ error: 'Failed to process Excel file. Ensure it is a valid format.' });
+    }
+});
+
+// POST /api/admin/teachers/commit-upload
+// Commits the parsed Excel preview data to the database safely
+router.post('/commit-upload', async (req, res) => {
+    const { teachers } = req.body;
+
+    if (!teachers || !Array.isArray(teachers)) {
+        return res.status(400).json({ error: 'Invalid teacher data provided' });
+    }
+
+    try {
+        await db.query('BEGIN');
+
+        for (const t of teachers) {
+            // Check if teacher exists by email
+            const checkRes = await db.query('SELECT id FROM teachers WHERE email = $1', [t.email]);
+            
+            if (checkRes.rows.length > 0) {
+                // Update existing teacher (keeps their ID, thus preserving allocations)
+                await db.query(
+                    'UPDATE teachers SET full_name = $1, teacher_type = $2 WHERE email = $3', 
+                    [t.full_name, t.teacher_type, t.email]
+                );
+            } else {
+                // Insert new teacher
+                await db.query(
+                    'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3)', 
+                    [t.full_name, t.email, t.teacher_type || 'Faculty']
+                );
+            }
+        }
+
+        await db.query('COMMIT');
+        res.json({ message: 'Teachers imported successfully from Excel.' });
+    } catch (err) {
+        await db.query('ROLLBACK');
+        console.error('Error committing teachers:', err);
+        res.status(500).json({ error: 'Failed to save changes to database' });
     }
 });
 
