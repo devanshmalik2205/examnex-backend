@@ -49,9 +49,15 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
     const { id } = req.params;
     try {
+        // We should first remove allocations before deleting the teacher to avoid foreign key constraint violations
+        await db.query('BEGIN');
+        await db.query('DELETE FROM timetable_course_teachers WHERE teacher_id = $1', [id]);
         await db.query('DELETE FROM teachers WHERE id = $1', [id]);
+        await db.query('COMMIT');
+        
         res.json({ message: 'Teacher deleted successfully' });
     } catch (err) {
+        await db.query('ROLLBACK');
         console.error('Error deleting teacher:', err);
         res.status(500).json({ error: 'Server error deleting teacher' });
     }
@@ -62,8 +68,14 @@ router.get('/:id/allocations', async (req, res) => {
     const { id } = req.params;
     try {
         // Fetch all courses and timetables (sections) the teacher is allocated to
+        // Fixed schema mismatch: Using course_title instead of course_name, and constructing timetable name.
         const { rows } = await db.query(`
-            SELECT tct.course_id, tct.timetable_id, c.course_name, c.course_code, t.name as timetable_name
+            SELECT 
+                tct.course_id, 
+                tct.timetable_id, 
+                c.course_title, 
+                c.course_code, 
+                CONCAT(t.stream, ' - Sem ', t.semester, ' (', t.batch_year, ')') as timetable_name
             FROM timetable_course_teachers tct
             JOIN courses c ON tct.course_id = c.id
             JOIN timetables t ON tct.timetable_id = t.id
@@ -90,10 +102,13 @@ router.post('/:id/allocations', async (req, res) => {
         // 2. Insert new allocations
         if (allocations && allocations.length > 0) {
             for (let alloc of allocations) {
-                await db.query(
-                    'INSERT INTO timetable_course_teachers (teacher_id, course_id, timetable_id) VALUES ($1, $2, $3)',
-                    [id, alloc.course_id, alloc.timetable_id]
-                );
+                // Ensure we don't insert empty/invalid rows
+                if (alloc.course_id && alloc.timetable_id) {
+                    await db.query(
+                        'INSERT INTO timetable_course_teachers (teacher_id, course_id, timetable_id) VALUES ($1, $2, $3)',
+                        [id, alloc.course_id, alloc.timetable_id]
+                    );
+                }
             }
         }
 
@@ -109,8 +124,15 @@ router.post('/:id/allocations', async (req, res) => {
 // GET dropdown data for allocations (Courses and Sections/Timetables)
 router.get('/data/options', async (req, res) => {
     try {
-        const courses = await db.query('SELECT id, course_name, course_code FROM courses ORDER BY course_name ASC');
-        const timetables = await db.query('SELECT id, name FROM timetables ORDER BY name ASC'); // Assuming timetables act as sections
+        // Using course_title instead of course_name based on DB schema
+        const courses = await db.query('SELECT id, course_title, course_code FROM courses ORDER BY course_title ASC');
+        
+        // Constructing a readable name for timetables since they lack a direct 'name' column
+        const timetables = await db.query(`
+            SELECT id, CONCAT(stream, ' - Sem ', semester, ' (', batch_year, ')') as name 
+            FROM timetables 
+            ORDER BY batch_year DESC, stream ASC, semester ASC
+        `);
         
         res.json({
             courses: courses.rows,
