@@ -4,6 +4,7 @@ require('dotenv').config();
 
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
+const teacherRoutes = require('./routes/teachers'); // <-- Added new route
 
 const app = express();
 
@@ -17,6 +18,7 @@ app.use(express.json());
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin/teachers', teacherRoutes); // <-- Mounted teachers route
 
 // Health check endpoint
 app.get('/health', (req, res) => {
