@@ -10,9 +10,11 @@ router.get('/', async (req, res) => {
             SELECT 
                 id, 
                 course_code, 
+                abbreviation,
                 course_title, 
                 category, 
                 credits,
+                ldp,
                 course_type
             FROM courses
             ORDER BY course_title ASC
@@ -100,6 +102,71 @@ router.get('/:id/details', async (req, res) => {
     } catch (err) {
         console.error('Error fetching course details:', err);
         res.status(500).json({ error: 'Server error fetching course details' });
+    }
+});
+
+// POST a new course
+router.post('/', async (req, res) => {
+    const { course_code, abbreviation, course_title, category, credits, ldp, course_type } = req.body;
+    
+    try {
+        if (!course_title) {
+            return res.status(400).json({ error: 'Course Title is required' });
+        }
+
+        const { rows } = await db.query(
+            `INSERT INTO courses (course_code, abbreviation, course_title, category, credits, ldp, course_type) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7) 
+             RETURNING *`,
+            [course_code || null, abbreviation || null, course_title, category || null, credits ? parseFloat(credits) : null, ldp || null, course_type || 'regular']
+        );
+        
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        console.error('Error adding course:', err);
+        if (err.code === '23505') {
+            return res.status(400).json({ error: 'Course with this Code and Abbreviation already exists' });
+        }
+        res.status(500).json({ error: 'Server error adding course' });
+    }
+});
+
+// PUT (Edit) a course
+router.put('/:id', async (req, res) => {
+    const { id } = req.params;
+    const { course_code, abbreviation, course_title, category, credits, ldp, course_type } = req.body;
+
+    try {
+        const { rows } = await db.query(
+            `UPDATE courses 
+             SET course_code = $1, abbreviation = $2, course_title = $3, category = $4, credits = $5, ldp = $6, course_type = $7 
+             WHERE id = $8 
+             RETURNING *`,
+            [course_code || null, abbreviation || null, course_title, category || null, credits ? parseFloat(credits) : null, ldp || null, course_type || 'regular', id]
+        );
+        
+        if (rows.length === 0) return res.status(404).json({ error: 'Course not found' });
+        res.json(rows[0]);
+    } catch (err) {
+        console.error('Error updating course:', err);
+        if (err.code === '23505') {
+            return res.status(400).json({ error: 'Course with this Code and Abbreviation already exists' });
+        }
+        res.status(500).json({ error: 'Server error updating course' });
+    }
+});
+
+// DELETE a course
+router.delete('/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Due to CASCADE and SET NULL foreign keys set in the database, 
+        // deleting the course will automatically clean up mapping tables safely.
+        await db.query('DELETE FROM courses WHERE id = $1', [id]);
+        res.json({ message: 'Course deleted successfully' });
+    } catch (err) {
+        console.error('Error deleting course:', err);
+        res.status(500).json({ error: 'Server error deleting course' });
     }
 });
 
