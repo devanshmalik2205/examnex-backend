@@ -5,7 +5,8 @@ require('dotenv').config();
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
 const teacherRoutes = require('./routes/teachers');
-const studentRoutes = require('./routes/students'); // <-- Added students route
+const studentRoutes = require('./routes/students');
+const courseRoutes = require('./routes/courses'); // <-- Added courses route
 
 const app = express();
 
@@ -20,7 +21,8 @@ app.use(express.json());
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin/teachers', teacherRoutes);
-app.use('/api/admin/students', studentRoutes); // <-- Mounted students route
+app.use('/api/admin/students', studentRoutes);
+app.use('/api/admin/courses', courseRoutes); // <-- Mounted courses route
 
 // Health check endpoint
 app.get('/health', (req, res) => {
