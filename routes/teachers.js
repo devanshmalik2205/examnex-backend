@@ -191,16 +191,22 @@ router.post('/commit-upload', async (req, res) => {
     try {
         await db.query('BEGIN');
 
+        // Deduplicate locally to prevent intra-request constraint errors
+        const uniqueTeachersMap = {};
         for (const t of teachers) {
             if (!t.full_name) continue;
             const enforcedEmail = enforceBMUEmail(t.email, t.full_name);
+            if (!uniqueTeachersMap[enforcedEmail]) {
+                uniqueTeachersMap[enforcedEmail] = { ...t, email: enforcedEmail };
+            }
+        }
 
-            // BROAD SEARCH to catch unique constraint collisions
-            const checkRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(full_name) = $2', [enforcedEmail, t.full_name.toLowerCase()]);
+        for (const t of Object.values(uniqueTeachersMap)) {
+            const checkRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(full_name) = $2', [t.email, t.full_name.toLowerCase()]);
             if (checkRes.rows.length > 0) {
-                await db.query('UPDATE teachers SET full_name = $1, email = $2, teacher_type = $3 WHERE id = $4', [t.full_name, enforcedEmail, t.teacher_type, checkRes.rows[0].id]);
+                await db.query('UPDATE teachers SET full_name = $1, email = $2, teacher_type = $3 WHERE id = $4', [t.full_name, t.email, t.teacher_type, checkRes.rows[0].id]);
             } else {
-                await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3)', [t.full_name, enforcedEmail, t.teacher_type || 'Faculty']);
+                await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3)', [t.full_name, t.email, t.teacher_type || 'Faculty']);
             }
         }
 

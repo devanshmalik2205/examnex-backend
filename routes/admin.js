@@ -253,7 +253,7 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                             start_time: th.start,
                             end_time: th.end,
                             course_code: null, room: null,
-                            raw_entry: 'LUNCH', entry_type: 'LUNCH'
+                            raw_entry: 'LUNCH'
                         });
                         return;
                     }
@@ -315,11 +315,16 @@ router.post('/timetables/:id/commit', async (req, res) => {
             await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [timetableId]);
         }
 
+        // --- 1. Deduplicate & Process Courses ---
         const courseIdMap = {}; 
+        const uniqueCoursesMap = {};
         
         for (const c of (courses || [])) {
             if (!c.course_code) continue; 
-            
+            uniqueCoursesMap[c.course_code.toUpperCase()] = c; // Filter out identical course entries
+        }
+
+        for (const c of Object.values(uniqueCoursesMap)) {
             const cTitle = c.course_title || c.course_code;
             const cCat = c.category || 'General';
             const cAbbr = c.abbreviation || null;
@@ -343,45 +348,64 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
+        // --- 2. Deduplicate & Process Teachers ---
+        const uniqueTeachersMap = {};
+        for (const a of (allocations || [])) {
+            if(!a.faculty_email || !a.faculty_name || !a.course_code) continue;
+            const emailPrefix = a.faculty_email.split('@')[0].trim().toLowerCase();
+            const enforcedEmail = `${emailPrefix}@bmu.edu.in`;
+            
+            if (!uniqueTeachersMap[enforcedEmail]) {
+                uniqueTeachersMap[enforcedEmail] = a.faculty_name;
+            }
+        }
+
+        const teacherIdMap = {};
+        for (const [email, name] of Object.entries(uniqueTeachersMap)) {
+            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(full_name) = $2', [email, name.toLowerCase()]);
+            let teacherId;
+            
+            if (tRes.rows.length > 0) {
+                await db.query('UPDATE teachers SET full_name = $1, email = $2 WHERE id = $3', [name, email, tRes.rows[0].id]);
+                teacherId = tRes.rows[0].id;
+            } else {
+                let newTRes = await db.query(
+                    'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING id', 
+                    [name, email, 'Faculty']
+                );
+                teacherId = newTRes.rows[0].id;
+            }
+            teacherIdMap[email] = teacherId;
+        }
+
+        // --- 3. Link Teachers to Courses ---
         for (const a of (allocations || [])) {
             if(!a.faculty_email || !a.faculty_name || !a.course_code) continue;
 
             const emailPrefix = a.faculty_email.split('@')[0].trim().toLowerCase();
             const enforcedEmail = `${emailPrefix}@bmu.edu.in`;
 
-            // BROAD SEARCH: Check if they exist under this exact email OR this exact full name to prevent Unique Constraint crashes.
-            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(full_name) = $2', [enforcedEmail, a.faculty_name.toLowerCase()]);
-            let teacherId;
-            
-            if (tRes.rows.length > 0) {
-                await db.query('UPDATE teachers SET full_name = $1, email = $2 WHERE id = $3', [a.faculty_name, enforcedEmail, tRes.rows[0].id]);
-                teacherId = tRes.rows[0].id;
-            } else {
-                let newTRes = await db.query(
-                    'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING id', 
-                    [a.faculty_name, enforcedEmail, 'Faculty']
-                );
-                teacherId = newTRes.rows[0].id;
-            }
-            
-            if (courseIdMap[a.course_code]) {
+            const teacherId = teacherIdMap[enforcedEmail];
+            const courseId = courseIdMap[a.course_code];
+
+            if (teacherId && courseId) {
                 const existCheck = await db.query(
                     'SELECT 1 FROM timetable_course_teachers WHERE teacher_id = $1 AND course_id = $2 AND timetable_id = $3',
-                    [teacherId, courseIdMap[a.course_code], timetableId]
+                    [teacherId, courseId, timetableId]
                 );
                 
                 if (existCheck.rows.length === 0) {
                     await db.query(`
                         INSERT INTO timetable_course_teachers (teacher_id, course_id, timetable_id)
                         VALUES ($1, $2, $3)
-                    `, [teacherId, courseIdMap[a.course_code], timetableId]);
+                    `, [teacherId, courseId, timetableId]);
                 }
             }
         }
 
+        // --- 4. Insert Entries ---
         if (entries && entries.length > 0) {
             for (const e of entries) {
-                // Safeguard against missing vital time data which crashes DB constraints
                 if (!e.day_of_week || !e.start_time || !e.end_time) continue; 
 
                 const courseId = courseIdMap[e.course_code] || null;
