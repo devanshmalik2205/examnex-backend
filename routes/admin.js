@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../config/db');
 const multer = require('multer');
 const xlsx = require('xlsx');
+const bcrypt = require('bcryptjs'); // Added bcrypt for hashing passwords
 
 // Use memory storage for processing the file immediately
 const upload = multer({ storage: multer.memoryStorage() });
@@ -37,7 +38,7 @@ const generateBMUEmail = (fullName) => {
     return `${cleanName}@bmu.edu.in`;
 };
 
-// Helper to parse time headers, cleaning up Excel newline breaks
+// Helper to parse time headers, cleaning up Excel newline breaks (e.g., "9:00 AM-\n9:55 AM")
 const parseTimeHeader = (str) => {
     const normalizedStr = str.replace(/[\n\r]/g, ' ');
     const match = normalizedStr.match(/(\d{1,2}:\d{2})\s*([AP]M)?\s*-\s*(\d{1,2}:\d{2})\s*([AP]M)?/i);
@@ -371,28 +372,33 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
+        // Generate hashed password for all imported teachers missing one
+        const salt = await bcrypt.genSalt(6);
+        const defaultPassword = await bcrypt.hash('password123', salt);
+
         const teacherIdMap = {};
         for (const [email, name] of Object.entries(uniqueTeachersMap)) {
-            // Check specifically by email first
-            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1', [email]);
+            const username = email.split('@')[0]; // Unique Username derived from email
+            
+            // Check specifically by email OR username
+            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(username) = $2', [email, username]);
             let teacherId;
             
             if (tRes.rows.length > 0) {
                 teacherId = tRes.rows[0].id;
                 try {
-                    // Try to update their name, but silently catch if it causes a collision
                     await db.query('UPDATE teachers SET full_name = $1 WHERE id = $2', [name, teacherId]);
                 } catch(e) {} 
             } else {
                 try {
+                    // Includes Username and Default Password to satisfy DB constraints
                     let newTRes = await db.query(
-                        'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING id', 
-                        [name, email, 'Faculty']
+                        'INSERT INTO teachers (username, password, full_name, email, teacher_type) VALUES ($1, $2, $3, $4, $5) RETURNING id', 
+                        [username, defaultPassword, name, email, 'faculty'] // Set to 'faculty' as safe fallback
                     );
                     teacherId = newTRes.rows[0].id;
                 } catch (insertErr) {
                     if (insertErr.code === '23505') {
-                        // Crucial Fix: A Unique Constraint violation means the NAME is likely taken by a different email!
                         let fbRes = await db.query('SELECT id FROM teachers WHERE LOWER(full_name) = $1', [name.toLowerCase()]);
                         if (fbRes.rows.length > 0) {
                             teacherId = fbRes.rows[0].id;

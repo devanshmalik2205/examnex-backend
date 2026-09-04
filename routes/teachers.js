@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../config/db');
 const multer = require('multer');
 const xlsx = require('xlsx');
+const bcrypt = require('bcryptjs'); // Needed for hashing passwords
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -51,14 +52,21 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
     let { full_name, email, teacher_type } = req.body;
     email = enforceBMUEmail(email, full_name);
+    const username = email.split('@')[0];
 
     try {
+        const salt = await bcrypt.genSalt(6);
+        const hashedPassword = await bcrypt.hash('password123', salt);
+
         const { rows } = await db.query(
-            'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING *',
-            [full_name, email, teacher_type || 'Faculty']
+            'INSERT INTO teachers (username, password, full_name, email, teacher_type) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+            [username, hashedPassword, full_name, email, teacher_type || 'faculty']
         );
         res.status(201).json(rows[0]);
     } catch (err) {
+        if (err.code === '23505') {
+            return res.status(400).json({ error: 'Teacher with this name or email already exists.' });
+        }
         res.status(500).json({ error: 'Server error adding teacher' });
     }
 });
@@ -190,7 +198,7 @@ router.post('/commit-upload', async (req, res) => {
     try {
         await db.query('BEGIN');
 
-        // Deduplicate locally to prevent intra-request constraint errors
+        // Deduplicate locally
         const uniqueTeachersMap = {};
         for (const t of teachers) {
             if (!t.full_name) continue;
@@ -200,15 +208,22 @@ router.post('/commit-upload', async (req, res) => {
             }
         }
 
+        const salt = await bcrypt.genSalt(6);
+        const defaultPassword = await bcrypt.hash('password123', salt);
+
         for (const t of Object.values(uniqueTeachersMap)) {
-            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1', [t.email]);
+            const username = t.email.split('@')[0];
+            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(username) = $2', [t.email, username]);
+            
             if (tRes.rows.length > 0) {
                 try {
                     await db.query('UPDATE teachers SET full_name = $1, teacher_type = $2 WHERE id = $3', [t.full_name, t.teacher_type, tRes.rows[0].id]);
                 } catch(e) {}
             } else {
                 try {
-                    await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3)', [t.full_name, t.email, t.teacher_type || 'Faculty']);
+                    // Includes Username and hashed Password for strict DB constraint mapping
+                    await db.query('INSERT INTO teachers (username, password, full_name, email, teacher_type) VALUES ($1, $2, $3, $4, $5)', 
+                    [username, defaultPassword, t.full_name, t.email, t.teacher_type || 'faculty']);
                 } catch (err) {
                     if (err.code === '23505') {
                         let fallbackRes = await db.query('SELECT id FROM teachers WHERE LOWER(full_name) = $1', [t.full_name.toLowerCase()]);
