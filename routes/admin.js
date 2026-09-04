@@ -7,7 +7,6 @@ const bcrypt = require('bcryptjs');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Drop the restrictive constraint quietly so we can add new teacher roles
 const dropTeacherConstraint = async () => {
     try {
         await db.query('ALTER TABLE teachers DROP CONSTRAINT IF EXISTS teachers_teacher_type_check;');
@@ -108,7 +107,6 @@ router.delete('/timetables/:id', async (req, res) => {
 router.get('/timetables/:id', async (req, res) => {
     const timetableId = req.params.id;
     try {
-        // --- AUTO-HEALING STUDENT LINKAGE ---
         const ttInfo = await db.query('SELECT batch_year, stream FROM timetables WHERE id = $1', [timetableId]);
         if (ttInfo.rows.length > 0) {
             const { batch_year, stream } = ttInfo.rows[0];
@@ -193,6 +191,7 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
         const courses = new Map();
         const allocations = [];
         const entries = []; 
+        const minorCodes = []; // Track minor courses specifically
 
         if (listHeaders['Course Code']) {
             for (let r = 0; r < rawData.length; r++) {
@@ -208,8 +207,23 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
 
                 if (abbr) abbrToCode[abbr] = cCode;
 
+                // Check if this course is categorized as a Minor
+                let isMinor = false;
+                if (
+                    (cTitle && cTitle.toLowerCase().includes('minor')) || 
+                    (category && category.toLowerCase().includes('minor')) ||
+                    (abbr && abbr.toLowerCase().includes('minor'))
+                ) {
+                    isMinor = true;
+                    minorCodes.push(cCode);
+                }
+
                 if (!courses.has(cCode)) {
-                    courses.set(cCode, { course_code: cCode, course_title: cTitle, abbreviation: abbr, category, credits, ldp });
+                    courses.set(cCode, { 
+                        course_code: cCode, course_title: cTitle, abbreviation: abbr, 
+                        category, credits, ldp, 
+                        course_type: isMinor ? 'minor' : 'regular' 
+                    });
                 }
 
                 const rawFaculty = row[listHeaders['Course Faculty']]?.toString().trim();
@@ -241,6 +255,21 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                         return;
                     }
 
+                    // If cell just says "Minor", expand it into all extracted minor subjects so they link properly
+                    if (cellVal.toUpperCase() === 'MINOR' || cellVal.toUpperCase().includes('MINOR (NANO TECH)')) {
+                        if (minorCodes.length > 0) {
+                            minorCodes.forEach(mCode => {
+                                entries.push({ 
+                                    day_of_week: matchedDay.substring(0,3), start_time: th.start, end_time: th.end, 
+                                    course_code: mCode, room: 'TBA', raw_entry: 'Minor' 
+                                });
+                            });
+                        } else {
+                            entries.push({ day_of_week: matchedDay.substring(0,3), start_time: th.start, end_time: th.end, course_code: null, room: 'TBA', raw_entry: cellVal });
+                        }
+                        return;
+                    }
+
                     const classes = cellVal.split(/\n|\/|\|/);
                     classes.forEach(clsStr => {
                         const cls = clsStr.trim();
@@ -249,7 +278,6 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                         let guessedCode = null;
                         let guessedRoom = 'TBA';
                         
-                        // Updated regex: Prioritize explicit room names (GA202B, NB 311) over generic words like LAB
                         const roomMatch = cls.match(/\b([A-Z]{2}\s?\d{3}[A-Z]?|WORKSHOP|MDC|MPH)\b/i);
                         if (roomMatch) {
                             guessedRoom = roomMatch[1].toUpperCase();
@@ -291,7 +319,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
         
         let targetTimetableIds = [timetableId];
 
-        // If Global Import, find ALL timetables matching the Year and Semester of the targeted one
         if (isGlobalImport) {
             const ttInfo = await db.query('SELECT batch_year, semester FROM timetables WHERE id = $1', [timetableId]);
             if (ttInfo.rows.length > 0) {
@@ -301,8 +328,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
-        // Delete dependencies ONLY IF not a global import OR if we are explicitly overwriting
-        // For Global Import (Minors), we append rather than wipe existing core subjects.
         if (!isGlobalImport) {
             for (const tId of targetTimetableIds) {
                 await db.query('DELETE FROM timetable_course_teachers WHERE timetable_id = $1', [tId]);
@@ -327,10 +352,10 @@ router.post('/timetables/:id/commit', async (req, res) => {
             
             if (cRes.rows.length > 0) {
                 courseIdMap[c.course_code] = cRes.rows[0].id;
-                try { await db.query('UPDATE courses SET course_title = $1, category = $2, abbreviation = $3, credits = $4, ldp = $5 WHERE id = $6', [cTitle, c.category || 'General', c.abbreviation || null, creditsVal, c.ldp || null, cRes.rows[0].id]); } catch(e) {}
+                try { await db.query('UPDATE courses SET course_title = $1, category = $2, abbreviation = $3, credits = $4, ldp = $5, course_type = $6 WHERE id = $7', [cTitle, c.category || 'General', c.abbreviation || null, creditsVal, c.ldp || null, c.course_type || 'regular', cRes.rows[0].id]); } catch(e) {}
             } else {
                 try {
-                    let newCRes = await db.query('INSERT INTO courses (course_code, course_title, category, abbreviation, credits, ldp) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id', [c.course_code.toUpperCase(), cTitle, c.category || 'General', c.abbreviation || null, creditsVal, c.ldp || null]);
+                    let newCRes = await db.query('INSERT INTO courses (course_code, course_title, category, abbreviation, credits, ldp, course_type) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id', [c.course_code.toUpperCase(), cTitle, c.category || 'General', c.abbreviation || null, creditsVal, c.ldp || null, c.course_type || 'regular']);
                     courseIdMap[c.course_code] = newCRes.rows[0].id;
                 } catch(e) {
                     if (e.code === '23505') {
@@ -405,9 +430,8 @@ router.post('/timetables/:id/commit', async (req, res) => {
                     const raw = e.raw_entry || e.course_code || 'Session';
                     const entryType = (raw === 'LUNCH' || e.entry_type === 'LUNCH') ? 'LUNCH' : 'CLASS';
 
-                    // For global import (Minors), delete specific overlapping slots so it doesn't duplicate
                     if (isGlobalImport) {
-                        await db.query(`DELETE FROM timetable_entries WHERE timetable_id = $1 AND day_of_week = $2 AND start_time = $3`, [tId, e.day_of_week, e.start_time]);
+                        await db.query(`DELETE FROM timetable_entries WHERE timetable_id = $1 AND day_of_week = $2 AND start_time = $3 AND (raw_entry ILIKE '%minor%' OR raw_entry = $4)`, [tId, e.day_of_week, e.start_time, raw]);
                     }
 
                     await db.query(`INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [tId, courseId, e.day_of_week, e.start_time, e.end_time, room, raw, entryType]);
@@ -415,7 +439,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
-        // Relink students automatically at commit
         const ttInfo = await db.query('SELECT batch_year, stream FROM timetables WHERE id = $1', [timetableId]);
         if (ttInfo.rows.length > 0) {
             const { batch_year, stream } = ttInfo.rows[0];
