@@ -29,9 +29,14 @@ const parseTeachersList = (rawString) => {
 // Helper to generate dot-separated email (e.g., kiran.sharma@bmu.edu.in)
 const generateBMUEmail = (fullName) => {
     if (!fullName) return '';
-    // Remove extra spaces and special chars, replace spaces with dots
-    const cleaned = fullName.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '.').toLowerCase();
-    return `${cleaned}@bmu.edu.in`;
+    // 1. Strip titles
+    let cleanName = fullName.replace(/^(Dr\.|Dr\s|Mr\.|Mr\s|Mrs\.|Mrs\s|Ms\.|Ms\s|Prof\.|Prof\s|Er\.|Er\s)+/i, '').trim();
+    // 2. Remove anything that isn't a letter, number, or space
+    cleanName = cleanName.replace(/[^a-zA-Z0-9\s]/g, '').trim();
+    // 3. Replace spaces with dots and lowercase
+    cleanName = cleanName.replace(/\s+/g, '.').toLowerCase();
+    
+    return `${cleanName}@bmu.edu.in`;
 };
 
 // Helper to parse time headers like "9:00 AM - 9:55 AM" or "10:00 AM- 10:55 AM"
@@ -123,9 +128,10 @@ router.delete('/timetables/:id', async (req, res) => {
 router.get('/timetables/:id', async (req, res) => {
     const timetableId = req.params.id;
     try {
+        // Including backwards compatibility if your DB uses entry_type, but keeping queries safe
         const entriesQuery = `
             SELECT 
-                te.id AS entry_id, te.day_of_week, te.start_time, te.end_time, te.room, te.entry_type, te.raw_entry,
+                te.id AS entry_id, te.day_of_week, te.start_time, te.end_time, te.room, te.raw_entry,
                 c.id AS course_id, c.course_code, c.abbreviation, c.course_title, c.category, c.sub_category, c.credits, c.ldp, c.course_type,
                 (
                     SELECT json_agg(json_build_object('id', t.id, 'full_name', t.full_name, 'email', t.email, 'type', t.teacher_type))
@@ -153,7 +159,6 @@ router.get('/timetables/:id', async (req, res) => {
 });
 
 // POST /api/admin/timetables/:id/upload-preview
-// Advanced 2D Grid + List Parser
 router.post('/timetables/:id/upload-preview', upload.single('file'), async (req, res) => {
     const timetableId = req.params.id;
     if (!req.file) return res.status(400).json({ error: 'No Excel file provided' });
@@ -167,26 +172,22 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
 
         const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
-        // Read as 2D Array to handle the complex split-layout
         const rawData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: '' });
 
         let timeHeaders = [];
         let listHeaders = {};
         
-        // 1. Locate Headers (Scan first 15 rows)
         for (let r = 0; r < Math.min(15, rawData.length); r++) {
             const row = rawData[r];
             for (let c = 0; c < row.length; c++) {
                 const cell = row[c].toString().trim();
                 if (!cell) continue;
                 
-                // Identify Time Slots (Grid)
                 const tMatch = parseTimeHeader(cell);
                 if (tMatch) {
                     timeHeaders.push({ colIndex: c, start: tMatch.start, end: tMatch.end });
                 }
                 
-                // Identify List Headers (Right Side)
                 const cUpper = cell.toUpperCase();
                 if (cUpper.includes('COURSE CODE')) listHeaders['Course Code'] = c;
                 if (cUpper.includes('TITLE ABBR') || cUpper === 'ABBREVIATION') listHeaders['Course Title Abbr'] = c;
@@ -203,7 +204,6 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
         const allocations = [];
         const entries = []; 
 
-        // 2. Extract List Data (Courses & Faculty)
         if (listHeaders['Course Code']) {
             for (let r = 0; r < rawData.length; r++) {
                 const row = rawData[r];
@@ -229,19 +229,17 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                 if (rawFaculty) {
                     const fNames = parseTeachersList(rawFaculty);
                     fNames.forEach(fName => {
-                        const fEmail = generateBMUEmail(fName); // Create dotted email
+                        const fEmail = generateBMUEmail(fName);
                         allocations.push({ course_code: cCode, faculty_name: fName, faculty_email: fEmail });
                     });
                 }
             }
         }
 
-        // 3. Extract Grid Data (Timetable Slots)
         if (timeHeaders.length > 0) {
             const validDays = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
             for (let r = 0; r < rawData.length; r++) {
                 const row = rawData[r];
-                // Check first two columns for Day indicator
                 const firstCell = (row[0] || '').toString().trim().toUpperCase() || (row[1] || '').toString().trim().toUpperCase();
                 const matchedDay = validDays.find(d => firstCell === d || firstCell.startsWith(d));
                 
@@ -251,19 +249,17 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                     const cellVal = row[th.colIndex]?.toString().trim();
                     if (!cellVal) return;
 
-                    // Handle Lunch explicitly
                     if (cellVal.toUpperCase() === 'LUNCH' || cellVal.toUpperCase().includes('LUNCH')) {
                         entries.push({
                             day_of_week: matchedDay.substring(0,3),
                             start_time: th.start,
                             end_time: th.end,
                             course_code: null, room: null,
-                            raw_entry: 'LUNCH', entry_type: 'LUNCH'
+                            raw_entry: 'LUNCH'
                         });
                         return;
                     }
 
-                    // Split classes by slash or newline (e.g. AEVT GA204 / CFD GA205)
                     const classes = cellVal.split(/\n|\/|\|/);
                     classes.forEach(clsStr => {
                         const cls = clsStr.trim();
@@ -272,11 +268,9 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                         let guessedCode = null;
                         let guessedRoom = 'TBA';
 
-                        // Extract Room (e.g., GA204, NR209, LAB, MDC)
                         const roomMatch = cls.match(/\b([A-Z]{1,3}\d{3}[A-Z]?|LAB|MDC|MPH)\b/i);
                         if (roomMatch) guessedRoom = roomMatch[1].toUpperCase();
 
-                        // Map via Abbreviation
                         for (const [abbr, code] of Object.entries(abbrToCode)) {
                             if (cls.toUpperCase().includes(abbr.toUpperCase())) {
                                 guessedCode = code;
@@ -284,7 +278,6 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                             }
                         }
 
-                        // Fallback map via Course Code exactly
                         if (!guessedCode) {
                             const possibleCode = cls.split(' ')[0].toUpperCase();
                             if (courses.has(possibleCode)) guessedCode = possibleCode;
@@ -318,6 +311,7 @@ router.post('/timetables/:id/commit', async (req, res) => {
     try {
         await db.query('BEGIN');
 
+        // Clear existing dependencies
         await db.query('DELETE FROM timetable_course_teachers WHERE timetable_id = $1', [timetableId]);
         if (entries && entries.length > 0) {
             await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [timetableId]);
@@ -325,17 +319,16 @@ router.post('/timetables/:id/commit', async (req, res) => {
 
         const courseIdMap = {}; 
         
-        // 1. Process Courses with absolute null fallbacks to prevent pg-node crashes
         for (const c of (courses || [])) {
             if (!c.course_code) continue; 
             
-            let cRes = await db.query('SELECT id FROM courses WHERE course_code = $1', [c.course_code]);
-            let creditsVal = (c.credits && !isNaN(parseFloat(c.credits))) ? parseFloat(c.credits) : null;
-            
             const cTitle = c.course_title || c.course_code;
-            const cCat = c.category || null;
+            const cCat = c.category || 'General';
             const cAbbr = c.abbreviation || null;
+            const creditsVal = (c.credits && !isNaN(parseFloat(c.credits))) ? parseFloat(c.credits) : null;
             const cLdp = c.ldp || null;
+
+            let cRes = await db.query('SELECT id FROM courses WHERE course_code = $1', [c.course_code]);
             
             if (cRes.rows.length > 0) {
                 await db.query(
@@ -352,7 +345,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
-        // 2. Process Allocations & Teachers safely
         for (const a of (allocations || [])) {
             if(!a.faculty_email || !a.faculty_name || !a.course_code) continue;
 
@@ -374,7 +366,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
             
             if (courseIdMap[a.course_code]) {
-                // Manual duplication check instead of relying on exact ON CONFLICT constraints 
                 const existCheck = await db.query(
                     'SELECT 1 FROM timetable_course_teachers WHERE teacher_id = $1 AND course_id = $2 AND timetable_id = $3',
                     [teacherId, courseIdMap[a.course_code], timetableId]
@@ -389,22 +380,19 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
-        // 3. Process Entries with absolute null fallbacks
         if (entries && entries.length > 0) {
             for (const e of entries) {
+                // Safeguard against missing vital time data which crashes DB constraints
+                if (!e.day_of_week || !e.start_time || !e.end_time) continue; 
+
                 const courseId = courseIdMap[e.course_code] || null;
-                const entryType = (e.raw_entry === 'LUNCH' || e.entry_type === 'LUNCH') ? 'LUNCH' : 'CLASS';
-                
-                const day = e.day_of_week || null;
-                const start = e.start_time || null;
-                const end = e.end_time || null;
-                const room = e.room || null;
-                const raw = e.raw_entry || null;
+                const room = e.room || 'TBA';
+                const raw = e.raw_entry || e.course_code || 'Session';
 
                 await db.query(`
-                    INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                `, [timetableId, courseId, day, start, end, room, raw, entryType]);
+                    INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                `, [timetableId, courseId, e.day_of_week, e.start_time, e.end_time, room, raw]);
             }
         }
 
@@ -413,8 +401,8 @@ router.post('/timetables/:id/commit', async (req, res) => {
     } catch (err) {
         await db.query('ROLLBACK');
         console.error('Error committing changes:', err);
-        // Providing specific database error messages directly back to the UI modal
-        res.status(500).json({ error: `Database Error: ${err.message || 'Failed to save changes.'}` });
+        // Extract database specific errors to pass to frontend for easier debugging
+        res.status(500).json({ error: err.detail || err.message || 'Failed to save changes to database' });
     }
 });
 

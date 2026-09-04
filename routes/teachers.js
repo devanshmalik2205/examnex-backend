@@ -10,12 +10,12 @@ const upload = multer({ storage: multer.memoryStorage() });
 const enforceBMUEmail = (email, name) => {
     if (!email) {
         if (!name) return '';
-        // Create dotted email: kiran.sharma@bmu.edu.in
-        const cleaned = name.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '.').toLowerCase();
+        let cleanName = name.replace(/^(Dr\.|Dr\s|Mr\.|Mr\s|Mrs\.|Mrs\s|Ms\.|Ms\s|Prof\.|Prof\s|Er\.|Er\s)+/i, '').trim();
+        const cleaned = cleanName.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '.').toLowerCase();
         return `${cleaned}@bmu.edu.in`;
     }
-    // If they typed something like user.name@gmail.com, force it to @bmu.edu.in
-    const emailPrefix = email.split('@')[0].trim().toLowerCase();
+    // If they typed something like user.name@gmail.com, format it correctly
+    const emailPrefix = email.split('@')[0].trim().replace(/\s+/g, '.').toLowerCase();
     return `${emailPrefix}@bmu.edu.in`;
 };
 
@@ -207,7 +207,7 @@ router.post('/commit-upload', async (req, res) => {
         res.json({ message: 'Teachers imported successfully from Excel.' });
     } catch (err) {
         await db.query('ROLLBACK');
-        res.status(500).json({ error: 'Failed to save changes to database' });
+        res.status(500).json({ error: err.detail || err.message || 'Failed to save changes to database' });
     }
 });
 
