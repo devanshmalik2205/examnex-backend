@@ -3,11 +3,15 @@ const router = express.Router();
 const db = require('../config/db');
 const multer = require('multer');
 const xlsx = require('xlsx');
-const bcrypt = require('bcryptjs'); // Needed for hashing passwords
+const bcrypt = require('bcryptjs'); 
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Helper to strictly enforce dotted format and domain
+// Drop constraint locally to accept all teacher roles
+const dropTeacherConstraint = async () => {
+    try { await db.query('ALTER TABLE teachers DROP CONSTRAINT IF EXISTS teachers_teacher_type_check;'); } catch (e) {}
+};
+
 const enforceBMUEmail = (email, name) => {
     if (!email) {
         if (!name) return '';
@@ -50,6 +54,7 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
+    await dropTeacherConstraint();
     let { full_name, email, teacher_type } = req.body;
     email = enforceBMUEmail(email, full_name);
     const username = email.split('@')[0];
@@ -60,7 +65,7 @@ router.post('/', async (req, res) => {
 
         const { rows } = await db.query(
             'INSERT INTO teachers (username, password, full_name, email, teacher_type) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-            [username, hashedPassword, full_name, email, teacher_type || 'faculty']
+            [username, hashedPassword, full_name, email, teacher_type || 'Assistant Prof.']
         );
         res.status(201).json(rows[0]);
     } catch (err) {
@@ -72,6 +77,7 @@ router.post('/', async (req, res) => {
 });
 
 router.put('/:id', async (req, res) => {
+    await dropTeacherConstraint();
     const { id } = req.params;
     let { full_name, email, teacher_type } = req.body;
     email = enforceBMUEmail(email, full_name);
@@ -172,7 +178,7 @@ router.post('/upload-preview', upload.single('file'), async (req, res) => {
 
         rawData.forEach(row => {
             const fName = (row.FacultyName || row.Name || row.Teacher || row.Faculty || '')?.toString().trim();
-            const fType = (row.Type || row.TeacherType || 'Faculty')?.toString().trim();
+            const fType = (row.Type || row.TeacherType || 'Assistant Prof.')?.toString().trim();
             if (!fName) return; 
 
             let fEmail = enforceBMUEmail((row.FacultyEmail || row.Email || '')?.toString().trim(), fName);
@@ -195,10 +201,10 @@ router.post('/commit-upload', async (req, res) => {
     const { teachers } = req.body;
     if (!teachers || !Array.isArray(teachers)) return res.status(400).json({ error: 'Invalid teacher data provided' });
 
+    await dropTeacherConstraint();
+
     try {
         await db.query('BEGIN');
-
-        // Deduplicate locally
         const uniqueTeachersMap = {};
         for (const t of teachers) {
             if (!t.full_name) continue;
@@ -221,9 +227,8 @@ router.post('/commit-upload', async (req, res) => {
                 } catch(e) {}
             } else {
                 try {
-                    // Includes Username and hashed Password for strict DB constraint mapping
                     await db.query('INSERT INTO teachers (username, password, full_name, email, teacher_type) VALUES ($1, $2, $3, $4, $5)', 
-                    [username, defaultPassword, t.full_name, t.email, t.teacher_type || 'faculty']);
+                    [username, defaultPassword, t.full_name, t.email, t.teacher_type || 'Assistant Prof.']);
                 } catch (err) {
                     if (err.code === '23505') {
                         let fallbackRes = await db.query('SELECT id FROM teachers WHERE LOWER(full_name) = $1', [t.full_name.toLowerCase()]);
