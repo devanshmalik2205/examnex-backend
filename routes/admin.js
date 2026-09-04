@@ -30,14 +30,14 @@ const parseTeachersList = (rawString) => {
 const generateBMUEmail = (fullName) => {
     if (!fullName) return '';
     // Strip titles, remove anything that isn't a letter/number/space, replace spaces with dots
-    let cleanName = fullName.replace(/^(Dr\.|Dr\s|Mr\.|Mr\s|Mrs\.|Mrs\s|Ms\.|Ms\s|Prof\.|Prof\s|Er\.|Er\s)+/i, '').trim();
+    let cleanName = fullName.replace(/^(Dr\.|Dr\s|Mr\.|Mr\s|Mrs\.|Mrs\s|Ms\.|Ms\s|Prof\.|Prof\s|Er\.|Er\s)+/ig, '').trim();
     cleanName = cleanName.replace(/[^a-zA-Z0-9\s]/g, '').trim();
     cleanName = cleanName.replace(/\s+/g, '.').toLowerCase();
     
     return `${cleanName}@bmu.edu.in`;
 };
 
-// Helper to parse time headers, cleaning up Excel newline breaks (e.g., "9:00 AM-\n9:55 AM")
+// Helper to parse time headers, cleaning up Excel newline breaks
 const parseTimeHeader = (str) => {
     const normalizedStr = str.replace(/[\n\r]/g, ' ');
     const match = normalizedStr.match(/(\d{1,2}:\d{2})\s*([AP]M)?\s*-\s*(\d{1,2}:\d{2})\s*([AP]M)?/i);
@@ -253,7 +253,7 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                             start_time: th.start,
                             end_time: th.end,
                             course_code: null, room: null,
-                            raw_entry: 'LUNCH'
+                            raw_entry: 'LUNCH', entry_type: 'LUNCH'
                         });
                         return;
                     }
@@ -321,7 +321,7 @@ router.post('/timetables/:id/commit', async (req, res) => {
         
         for (const c of (courses || [])) {
             if (!c.course_code) continue; 
-            uniqueCoursesMap[c.course_code.toUpperCase()] = c; // Filter out identical course entries
+            uniqueCoursesMap[c.course_code.toUpperCase()] = c; 
         }
 
         for (const c of Object.values(uniqueCoursesMap)) {
@@ -334,17 +334,28 @@ router.post('/timetables/:id/commit', async (req, res) => {
             let cRes = await db.query('SELECT id FROM courses WHERE UPPER(course_code) = $1', [c.course_code.toUpperCase()]);
             
             if (cRes.rows.length > 0) {
-                await db.query(
-                    'UPDATE courses SET course_title = $1, category = $2, abbreviation = $3, credits = $4, ldp = $5 WHERE id = $6', 
-                    [cTitle, cCat, cAbbr, creditsVal, cLdp, cRes.rows[0].id]
-                );
                 courseIdMap[c.course_code] = cRes.rows[0].id;
+                try {
+                    await db.query(
+                        'UPDATE courses SET course_title = $1, category = $2, abbreviation = $3, credits = $4, ldp = $5 WHERE id = $6', 
+                        [cTitle, cCat, cAbbr, creditsVal, cLdp, cRes.rows[0].id]
+                    );
+                } catch(e) {} // Ignore if abbreviation update triggers unique constraint
             } else {
-                let newCRes = await db.query(
-                    'INSERT INTO courses (course_code, course_title, category, abbreviation, credits, ldp) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id', 
-                    [c.course_code.toUpperCase(), cTitle, cCat, cAbbr, creditsVal, cLdp]
-                );
-                courseIdMap[c.course_code] = newCRes.rows[0].id;
+                try {
+                    let newCRes = await db.query(
+                        'INSERT INTO courses (course_code, course_title, category, abbreviation, credits, ldp) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id', 
+                        [c.course_code.toUpperCase(), cTitle, cCat, cAbbr, creditsVal, cLdp]
+                    );
+                    courseIdMap[c.course_code] = newCRes.rows[0].id;
+                } catch(e) {
+                    if (e.code === '23505') {
+                        // Fallback if abbreviation collision occurred
+                        let fbRes = await db.query('SELECT id FROM courses WHERE UPPER(course_code) = $1 OR abbreviation = $2', [c.course_code.toUpperCase(), cAbbr]);
+                        if (fbRes.rows.length > 0) courseIdMap[c.course_code] = fbRes.rows[0].id;
+                        else throw e;
+                    } else throw e;
+                }
             }
         }
 
@@ -362,18 +373,39 @@ router.post('/timetables/:id/commit', async (req, res) => {
 
         const teacherIdMap = {};
         for (const [email, name] of Object.entries(uniqueTeachersMap)) {
-            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(full_name) = $2', [email, name.toLowerCase()]);
+            // Check specifically by email first
+            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1', [email]);
             let teacherId;
             
             if (tRes.rows.length > 0) {
-                await db.query('UPDATE teachers SET full_name = $1, email = $2 WHERE id = $3', [name, email, tRes.rows[0].id]);
                 teacherId = tRes.rows[0].id;
+                try {
+                    // Try to update their name, but silently catch if it causes a collision
+                    await db.query('UPDATE teachers SET full_name = $1 WHERE id = $2', [name, teacherId]);
+                } catch(e) {} 
             } else {
-                let newTRes = await db.query(
-                    'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING id', 
-                    [name, email, 'Faculty']
-                );
-                teacherId = newTRes.rows[0].id;
+                try {
+                    let newTRes = await db.query(
+                        'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING id', 
+                        [name, email, 'Faculty']
+                    );
+                    teacherId = newTRes.rows[0].id;
+                } catch (insertErr) {
+                    if (insertErr.code === '23505') {
+                        // Crucial Fix: A Unique Constraint violation means the NAME is likely taken by a different email!
+                        let fbRes = await db.query('SELECT id FROM teachers WHERE LOWER(full_name) = $1', [name.toLowerCase()]);
+                        if (fbRes.rows.length > 0) {
+                            teacherId = fbRes.rows[0].id;
+                            try {
+                                await db.query('UPDATE teachers SET email = $1 WHERE id = $2', [email, teacherId]);
+                            } catch(e) {}
+                        } else {
+                            throw insertErr;
+                        }
+                    } else {
+                        throw insertErr;
+                    }
+                }
             }
             teacherIdMap[email] = teacherId;
         }

@@ -10,11 +10,10 @@ const upload = multer({ storage: multer.memoryStorage() });
 const enforceBMUEmail = (email, name) => {
     if (!email) {
         if (!name) return '';
-        let cleanName = name.replace(/^(Dr\.|Dr\s|Mr\.|Mr\s|Mrs\.|Mrs\s|Ms\.|Ms\s|Prof\.|Prof\s|Er\.|Er\s)+/i, '').trim();
+        let cleanName = name.replace(/^(Dr\.|Dr\s|Mr\.|Mr\s|Mrs\.|Mrs\s|Ms\.|Ms\s|Prof\.|Prof\s|Er\.|Er\s)+/ig, '').trim();
         const cleaned = cleanName.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '.').toLowerCase();
         return `${cleaned}@bmu.edu.in`;
     }
-    // If they typed something like user.name@gmail.com, format it correctly
     const emailPrefix = email.split('@')[0].trim().replace(/\s+/g, '.').toLowerCase();
     return `${emailPrefix}@bmu.edu.in`;
 };
@@ -202,11 +201,22 @@ router.post('/commit-upload', async (req, res) => {
         }
 
         for (const t of Object.values(uniqueTeachersMap)) {
-            const checkRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(full_name) = $2', [t.email, t.full_name.toLowerCase()]);
-            if (checkRes.rows.length > 0) {
-                await db.query('UPDATE teachers SET full_name = $1, email = $2, teacher_type = $3 WHERE id = $4', [t.full_name, t.email, t.teacher_type, checkRes.rows[0].id]);
+            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1', [t.email]);
+            if (tRes.rows.length > 0) {
+                try {
+                    await db.query('UPDATE teachers SET full_name = $1, teacher_type = $2 WHERE id = $3', [t.full_name, t.teacher_type, tRes.rows[0].id]);
+                } catch(e) {}
             } else {
-                await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3)', [t.full_name, t.email, t.teacher_type || 'Faculty']);
+                try {
+                    await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3)', [t.full_name, t.email, t.teacher_type || 'Faculty']);
+                } catch (err) {
+                    if (err.code === '23505') {
+                        let fallbackRes = await db.query('SELECT id FROM teachers WHERE LOWER(full_name) = $1', [t.full_name.toLowerCase()]);
+                        if(fallbackRes.rows.length > 0) {
+                            try { await db.query('UPDATE teachers SET email = $1, teacher_type = $2 WHERE id = $3', [t.email, t.teacher_type, fallbackRes.rows[0].id]); } catch(e){}
+                        }
+                    } else throw err;
+                }
             }
         }
 
