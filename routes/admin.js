@@ -108,6 +108,7 @@ router.delete('/timetables/:id', async (req, res) => {
 router.get('/timetables/:id', async (req, res) => {
     const timetableId = req.params.id;
     try {
+        // --- AUTO-HEALING STUDENT LINKAGE ---
         const ttInfo = await db.query('SELECT batch_year, stream FROM timetables WHERE id = $1', [timetableId]);
         if (ttInfo.rows.length > 0) {
             const { batch_year, stream } = ttInfo.rows[0];
@@ -248,9 +249,14 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                         let guessedCode = null;
                         let guessedRoom = 'TBA';
                         
-                        // Enhanced regex to extract rooms like NB 311, GA202B, GA 204, LAB, MDC, WORKSHOP
-                        const roomMatch = cls.match(/\b([A-Z]{2}\s?\d{3}[A-Z]?|LAB|MDC|MPH|WORKSHOP)\b/i);
-                        if (roomMatch) guessedRoom = roomMatch[1].toUpperCase();
+                        // Updated regex: Prioritize explicit room names (GA202B, NB 311) over generic words like LAB
+                        const roomMatch = cls.match(/\b([A-Z]{2}\s?\d{3}[A-Z]?|WORKSHOP|MDC|MPH)\b/i);
+                        if (roomMatch) {
+                            guessedRoom = roomMatch[1].toUpperCase();
+                        } else if (cls.match(/\bLAB\b/i)) {
+                            // If no specific room is found but LAB is present, fallback to LAB
+                            guessedRoom = 'LAB';
+                        }
 
                         for (const [abbr, code] of Object.entries(abbrToCode)) {
                             if (cls.toUpperCase().includes(abbr.toUpperCase())) { guessedCode = code; break; }
