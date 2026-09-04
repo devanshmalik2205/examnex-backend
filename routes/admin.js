@@ -11,10 +11,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const cleanTeacherName = (name) => {
     if (!name) return '';
     let cleaned = name.trim();
-    // Strip connective prefixes like "With " or "And " occasionally found at the start
     cleaned = cleaned.replace(/^(With\s+|And\s+)/i, '');
-    
-    // Strip titles case-insensitively
     const prefixRegex = /^(Dr\.|Dr\s|Mr\.|Mr\s|Mrs\.|Mrs\s|Ms\.|Ms\s|Prof\.|Prof\s|Er\.|Er\s)+/i;
     while (prefixRegex.test(cleaned)) {
         cleaned = cleaned.replace(prefixRegex, '').trim();
@@ -25,12 +22,32 @@ const cleanTeacherName = (name) => {
 // Helper to split multiple teachers in a single cell
 const parseTeachersList = (rawString) => {
     if (!rawString) return [];
-    // Split by " and ", "&", "/", ","
     const parts = rawString.split(/\s+and\s+|\s*&\s*|\s*\/\s*|,/i);
     return parts.map(p => cleanTeacherName(p)).filter(p => p.length > 0);
 };
 
-// GET /api/admin/stats
+// Helper to parse time headers like "9:00 AM - 9:55 AM" or "10:00 AM- 10:55 AM"
+const parseTimeHeader = (str) => {
+    const match = str.match(/(\d{1,2}:\d{2})\s*([AP]M)?\s*-\s*(\d{1,2}:\d{2})\s*([AP]M)?/i);
+    if (!match) return null;
+    
+    let [_, startT, startM, endT, endM] = match;
+    if (!startM) startM = endM; 
+    
+    const to24 = (time, mod) => {
+        let [h, m] = time.split(':');
+        h = parseInt(h, 10);
+        if (mod && mod.toUpperCase() === 'PM' && h !== 12) h += 12;
+        if (mod && mod.toUpperCase() === 'AM' && h === 12) h = 0;
+        return `${h.toString().padStart(2, '0')}:${m}:00`;
+    };
+    
+    try {
+        return { start: to24(startT, startM), end: to24(endT, endM) };
+    } catch(e) { return null; }
+};
+
+// --- Standard Routes ---
 router.get('/stats', async (req, res) => {
     try {
         const examsResult = await db.query('SELECT COUNT(DISTINCT course_id) as total FROM timetable_entries');
@@ -51,28 +68,20 @@ router.get('/stats', async (req, res) => {
             conflicts: Math.floor((parseInt(clashesResult.rows[0].total) || 0) / 2)
         });
     } catch (err) {
-        console.error('Error fetching stats:', err);
         res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
-// GET /api/admin/timetables
 router.get('/timetables', async (req, res) => {
     try {
-        const query = `
-            SELECT id, batch_year, stream, semester, source_sheet 
-            FROM timetables 
-            ORDER BY batch_year DESC, stream ASC, semester ASC;
-        `;
+        const query = `SELECT id, batch_year, stream, semester, source_sheet FROM timetables ORDER BY batch_year DESC, stream ASC, semester ASC;`;
         const { rows } = await db.query(query);
         res.json(rows);
     } catch (err) {
-        console.error('Error fetching timetables:', err);
         res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
-// POST /api/admin/timetables (Create a new Section/Class)
 router.post('/timetables', async (req, res) => {
     const { batch_year, stream, semester } = req.body;
     try {
@@ -82,51 +91,36 @@ router.post('/timetables', async (req, res) => {
         );
         res.status(201).json(rows[0]);
     } catch (err) {
-        console.error('Error creating section:', err);
-        if (err.code === '23505') {
-            return res.status(400).json({ error: 'This specific Batch, Stream, and Semester combination already exists.' });
-        }
+        if (err.code === '23505') return res.status(400).json({ error: 'This specific Batch, Stream, and Semester combination already exists.' });
         res.status(500).json({ error: 'Failed to create section.' });
     }
 });
 
-// DELETE /api/admin/timetables/:id (Delete a Section/Class)
 router.delete('/timetables/:id', async (req, res) => {
     const { id } = req.params;
     try {
         await db.query('BEGIN');
-        // Delete dependent relationships first
         await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [id]);
         await db.query('DELETE FROM timetable_course_teachers WHERE timetable_id = $1', [id]);
         await db.query('DELETE FROM student_timetable WHERE timetable_id = $1', [id]);
-        
-        // Delete the timetable itself
         await db.query('DELETE FROM timetables WHERE id = $1', [id]);
         await db.query('COMMIT');
         res.json({ message: 'Section deleted successfully.' });
     } catch (err) {
         await db.query('ROLLBACK');
-        console.error('Error deleting section:', err);
         res.status(500).json({ error: 'Failed to delete section.' });
     }
 });
 
-// GET /api/admin/timetables/:id
 router.get('/timetables/:id', async (req, res) => {
     const timetableId = req.params.id;
-
     try {
         const entriesQuery = `
             SELECT 
                 te.id AS entry_id, te.day_of_week, te.start_time, te.end_time, te.room, te.entry_type, te.raw_entry,
                 c.id AS course_id, c.course_code, c.abbreviation, c.course_title, c.category, c.sub_category, c.credits, c.ldp, c.course_type,
                 (
-                    SELECT json_agg(json_build_object(
-                        'id', t.id, 
-                        'full_name', t.full_name, 
-                        'email', t.email,
-                        'type', t.teacher_type
-                    ))
+                    SELECT json_agg(json_build_object('id', t.id, 'full_name', t.full_name, 'email', t.email, 'type', t.teacher_type))
                     FROM timetable_course_teachers tct
                     JOIN teachers t ON tct.teacher_id = t.id
                     WHERE tct.course_id = c.id AND tct.timetable_id = $1
@@ -140,32 +134,20 @@ router.get('/timetables/:id', async (req, res) => {
 
         const studentsQuery = `
             SELECT s.id, s.registration_no, s.username, s.stream, s.email
-            FROM students s
-            JOIN student_timetable st ON s.id = st.student_id
-            WHERE st.timetable_id = $1
-            ORDER BY s.registration_no ASC;
+            FROM students s JOIN student_timetable st ON s.id = st.student_id WHERE st.timetable_id = $1 ORDER BY s.registration_no ASC;
         `;
         const { rows: students } = await db.query(studentsQuery, [timetableId]);
 
-        res.json({
-            entries: entries,
-            students: students,
-            stats: {
-                total_classes: entries.length,
-                total_students: students.length
-            }
-        });
+        res.json({ entries, students, stats: { total_classes: entries.length, total_students: students.length } });
     } catch (err) {
-        console.error('Error fetching timetable details:', err);
         res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
 // POST /api/admin/timetables/:id/upload-preview
-// Handles Curriculum, Faculty Allocations, and Schedule extraction
+// Advanced 2D Grid + List Parser
 router.post('/timetables/:id/upload-preview', upload.single('file'), async (req, res) => {
     const timetableId = req.params.id;
-    
     if (!req.file) return res.status(400).json({ error: 'No Excel file provided' });
 
     try {
@@ -177,77 +159,143 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
 
         const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
-        const rawData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+        // Read as 2D Array to handle the complex split-layout
+        const rawData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: '' });
 
+        let timeHeaders = [];
+        let listHeaders = {};
+        
+        // 1. Locate Headers (Scan first 15 rows)
+        for (let r = 0; r < Math.min(15, rawData.length); r++) {
+            const row = rawData[r];
+            for (let c = 0; c < row.length; c++) {
+                const cell = row[c].toString().trim();
+                if (!cell) continue;
+                
+                // Identify Time Slots (Grid)
+                const tMatch = parseTimeHeader(cell);
+                if (tMatch) {
+                    timeHeaders.push({ colIndex: c, start: tMatch.start, end: tMatch.end });
+                }
+                
+                // Identify List Headers (Right Side)
+                const cUpper = cell.toUpperCase();
+                if (cUpper.includes('COURSE CODE')) listHeaders['Course Code'] = c;
+                if (cUpper.includes('TITLE ABBR') || cUpper === 'ABBREVIATION') listHeaders['Course Title Abbr'] = c;
+                if (cUpper === 'COURSE' || cUpper === 'COURSE TITLE') listHeaders['Course'] = c;
+                if (cUpper === 'COURSE FACULTY' || cUpper.includes('FACULTY NAME')) listHeaders['Course Faculty'] = c;
+                if (cUpper === 'CATEGORY') listHeaders['Category'] = c;
+                if (cUpper === 'CREDITS') listHeaders['Credits'] = c;
+                if (cUpper === 'LDP') listHeaders['LDP'] = c;
+            }
+        }
+
+        const abbrToCode = {};
         const courses = new Map();
         const allocations = [];
         const entries = []; 
 
-        rawData.forEach(row => {
-            const cCode = (row['Course Code'] || row.CourseCode || row.SubjectCode || '').toString().trim();
-            const cTitle = (row['Course'] || row.CourseTitle || row.Subject || '').toString().trim();
-            
-            // If the row is missing fundamental course info, skip
-            if (!cCode) return; 
+        // 2. Extract List Data (Courses & Faculty)
+        if (listHeaders['Course Code']) {
+            for (let r = 0; r < rawData.length; r++) {
+                const row = rawData[r];
+                const cCode = row[listHeaders['Course Code']]?.toString().trim();
+                
+                if (!cCode || cCode.toUpperCase() === 'COURSE CODE') continue;
 
-            // Extract Course Details
-            const abbreviation = (row['Course Title Abbreviation'] || row.Abbreviation || '').toString().trim();
-            const category = (row['Category'] || '').toString().trim();
-            let credits = (row['Credits'] || '').toString().trim();
-            const ldp = (row['LDP'] || '').toString().trim();
+                const cTitle = row[listHeaders['Course']]?.toString().trim() || cCode;
+                const abbr = row[listHeaders['Course Title Abbr']]?.toString().trim();
+                const category = row[listHeaders['Category']]?.toString().trim();
+                const credits = row[listHeaders['Credits']]?.toString().trim();
+                const ldp = row[listHeaders['LDP']]?.toString().trim();
 
-            if (!courses.has(cCode)) {
-                courses.set(cCode, {
-                    course_code: cCode,
-                    course_title: cTitle || cCode,
-                    abbreviation,
-                    category,
-                    credits,
-                    ldp
+                if (abbr) abbrToCode[abbr] = cCode;
+
+                if (!courses.has(cCode)) {
+                    courses.set(cCode, {
+                        course_code: cCode, course_title: cTitle, abbreviation: abbr, category, credits, ldp
+                    });
+                }
+
+                const rawFaculty = row[listHeaders['Course Faculty']]?.toString().trim();
+                if (rawFaculty) {
+                    const fNames = parseTeachersList(rawFaculty);
+                    fNames.forEach(fName => {
+                        const cleanName = fName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+                        const fEmail = `${cleanName}@bmu.edu.in`; // Enforce @bmu.edu.in
+                        allocations.push({ course_code: cCode, faculty_name: fName, faculty_email: fEmail });
+                    });
+                }
+            }
+        }
+
+        // 3. Extract Grid Data (Timetable Slots)
+        if (timeHeaders.length > 0) {
+            const validDays = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+            for (let r = 0; r < rawData.length; r++) {
+                const row = rawData[r];
+                // Check first two columns for Day indicator
+                const firstCell = (row[0] || '').toString().trim().toUpperCase() || (row[1] || '').toString().trim().toUpperCase();
+                const matchedDay = validDays.find(d => firstCell === d || firstCell.startsWith(d));
+                
+                if (!matchedDay) continue;
+
+                timeHeaders.forEach(th => {
+                    const cellVal = row[th.colIndex]?.toString().trim();
+                    if (!cellVal) return;
+
+                    // Handle Lunch explicitly
+                    if (cellVal.toUpperCase() === 'LUNCH' || cellVal.toUpperCase().includes('LUNCH')) {
+                        entries.push({
+                            day_of_week: matchedDay.substring(0,3),
+                            start_time: th.start,
+                            end_time: th.end,
+                            course_code: null, room: null,
+                            raw_entry: 'LUNCH', entry_type: 'LUNCH'
+                        });
+                        return;
+                    }
+
+                    // Split classes by slash or newline (e.g. AEVT GA204 / CFD GA205)
+                    const classes = cellVal.split(/\n|\/|\|/);
+                    classes.forEach(clsStr => {
+                        const cls = clsStr.trim();
+                        if (!cls) return;
+
+                        let guessedCode = null;
+                        let guessedRoom = 'TBA';
+
+                        // Extract Room (e.g., GA204, NR209, LAB, MDC)
+                        const roomMatch = cls.match(/\b([A-Z]{1,3}\d{3}[A-Z]?|LAB|MDC|MPH)\b/i);
+                        if (roomMatch) guessedRoom = roomMatch[1].toUpperCase();
+
+                        // Map via Abbreviation
+                        for (const [abbr, code] of Object.entries(abbrToCode)) {
+                            if (cls.toUpperCase().includes(abbr.toUpperCase())) {
+                                guessedCode = code;
+                                break;
+                            }
+                        }
+
+                        // Fallback map via Course Code exactly
+                        if (!guessedCode) {
+                            const possibleCode = cls.split(' ')[0].toUpperCase();
+                            if (courses.has(possibleCode)) guessedCode = possibleCode;
+                        }
+
+                        entries.push({
+                            day_of_week: matchedDay.substring(0,3),
+                            start_time: th.start, end_time: th.end,
+                            course_code: guessedCode, room: guessedRoom, raw_entry: cls
+                        });
+                    });
                 });
             }
-
-            // Extract Faculty mapping (Clean and Split logic)
-            const rawFaculty = (row['Course Faculty'] || row['Faculty Name'] || row.Teacher || row.Faculty || '').toString().trim();
-            const facultyNames = parseTeachersList(rawFaculty);
-            
-            facultyNames.forEach(fName => {
-                const fEmail = `${fName.replace(/\s+/g, '').toLowerCase()}@university.edu`;
-                allocations.push({
-                    course_code: cCode,
-                    faculty_name: fName,
-                    faculty_email: fEmail
-                });
-            });
-
-            // Extract Standard Timetable Layout (Day, Time, Room) if present
-            const day = (row.Day || row.Day_of_Week || row.Weekday || '').toString().trim();
-            const start = (row.StartTime || row['Start Time'] || row.Start || '').toString().trim();
-            const end = (row.EndTime || row['End Time'] || row.End || '').toString().trim();
-            const room = (row.Room || row.Classroom || row['Room No'] || row['Room No.'] || 'TBA').toString().trim();
-
-            if (day && start && end) {
-                entries.push({
-                    day_of_week: day.substring(0, 3).toUpperCase(),
-                    start_time: start,
-                    end_time: end,
-                    course_code: cCode,
-                    room: room,
-                    raw_entry: cTitle || cCode
-                });
-            }
-        });
+        }
 
         res.json({
-            overwrites: {
-                total_allocations_deleted: totalAllocationsDeleted,
-                total_entries_deleted: totalEntriesDeleted
-            },
-            preview: {
-                courses: Array.from(courses.values()),
-                allocations: allocations,
-                entries: entries
-            }
+            overwrites: { total_allocations_deleted: totalAllocationsDeleted, total_entries_deleted: totalEntriesDeleted },
+            preview: { courses: Array.from(courses.values()), allocations: allocations, entries: entries }
         });
     } catch (err) {
         console.error('Error parsing Excel:', err);
@@ -263,15 +311,11 @@ router.post('/timetables/:id/commit', async (req, res) => {
     try {
         await db.query('BEGIN');
 
-        // 1. Wipe existing allocations and entries for this timetable
         await db.query('DELETE FROM timetable_course_teachers WHERE timetable_id = $1', [timetableId]);
-        
-        // Only wipe entries if new entries are being uploaded in this excel file
         if (entries && entries.length > 0) {
             await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [timetableId]);
         }
 
-        // 2. Insert or fetch existing Courses
         const courseIdMap = {}; 
         for (const c of courses) {
             let cRes = await db.query('SELECT id FROM courses WHERE course_code = $1', [c.course_code]);
@@ -288,11 +332,14 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
-        // 3. Insert or fetch existing Teachers & Link them
         for (const a of allocations) {
             if(!a.faculty_email || !a.faculty_name) continue;
 
-            let tRes = await db.query('SELECT id FROM teachers WHERE email = $1', [a.faculty_email]);
+            // Strict Domain Enforcement Before DB Insert
+            const emailPrefix = a.faculty_email.split('@')[0].trim().toLowerCase();
+            const enforcedEmail = `${emailPrefix}@bmu.edu.in`;
+
+            let tRes = await db.query('SELECT id FROM teachers WHERE email = $1', [enforcedEmail]);
             let teacherId;
             
             if (tRes.rows.length > 0) {
@@ -300,27 +347,26 @@ router.post('/timetables/:id/commit', async (req, res) => {
                 teacherId = tRes.rows[0].id;
             } else {
                 let newTRes = await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING id', 
-                    [a.faculty_name, a.faculty_email, 'Faculty']);
+                    [a.faculty_name, enforcedEmail, 'Faculty']);
                 teacherId = newTRes.rows[0].id;
             }
             
             if (courseIdMap[a.course_code]) {
                 await db.query(`
                     INSERT INTO timetable_course_teachers (teacher_id, course_id, timetable_id)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT DO NOTHING
+                    VALUES ($1, $2, $3) ON CONFLICT DO NOTHING
                 `, [teacherId, courseIdMap[a.course_code], timetableId]);
             }
         }
 
-        // 4. Update Time slots ONLY IF included 
         if (entries && entries.length > 0) {
             for (const e of entries) {
                 const courseId = courseIdMap[e.course_code] || null;
+                const entryType = (e.raw_entry === 'LUNCH' || e.entry_type === 'LUNCH') ? 'LUNCH' : 'CLASS';
                 await db.query(`
-                    INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                `, [timetableId, courseId, e.day_of_week, e.start_time, e.end_time, e.room, e.raw_entry]);
+                    INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                `, [timetableId, courseId, e.day_of_week, e.start_time, e.end_time, e.room, e.raw_entry, entryType]);
             }
         }
 

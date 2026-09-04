@@ -6,7 +6,15 @@ const xlsx = require('xlsx');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// GET all teachers alongside all their aggregated subjects & class allocations
+// Helper to strictly enforce domain
+const enforceBMUEmail = (email, name) => {
+    if (!email) {
+        if (!name) return '';
+        return `${name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}@bmu.edu.in`;
+    }
+    return `${email.split('@')[0].trim().toLowerCase()}@bmu.edu.in`;
+};
+
 router.get('/', async (req, res) => {
     try {
         const query = `
@@ -33,14 +41,14 @@ router.get('/', async (req, res) => {
         const { rows } = await db.query(query);
         res.json(rows);
     } catch (err) {
-        console.error('Error fetching teachers:', err);
         res.status(500).json({ error: 'Server error fetching teachers' });
     }
 });
 
-// POST a new teacher
 router.post('/', async (req, res) => {
-    const { full_name, email, teacher_type } = req.body;
+    let { full_name, email, teacher_type } = req.body;
+    email = enforceBMUEmail(email, full_name);
+
     try {
         const { rows } = await db.query(
             'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING *',
@@ -48,15 +56,15 @@ router.post('/', async (req, res) => {
         );
         res.status(201).json(rows[0]);
     } catch (err) {
-        console.error('Error adding teacher:', err);
         res.status(500).json({ error: 'Server error adding teacher' });
     }
 });
 
-// PUT (Edit) a teacher
 router.put('/:id', async (req, res) => {
     const { id } = req.params;
-    const { full_name, email, teacher_type } = req.body;
+    let { full_name, email, teacher_type } = req.body;
+    email = enforceBMUEmail(email, full_name);
+
     try {
         const { rows } = await db.query(
             'UPDATE teachers SET full_name = $1, email = $2, teacher_type = $3 WHERE id = $4 RETURNING *',
@@ -65,12 +73,10 @@ router.put('/:id', async (req, res) => {
         if (rows.length === 0) return res.status(404).json({ error: 'Teacher not found' });
         res.json(rows[0]);
     } catch (err) {
-        console.error('Error updating teacher:', err);
         res.status(500).json({ error: 'Server error updating teacher' });
     }
 });
 
-// DELETE a teacher
 router.delete('/:id', async (req, res) => {
     const { id } = req.params;
     try {
@@ -78,25 +84,19 @@ router.delete('/:id', async (req, res) => {
         await db.query('DELETE FROM timetable_course_teachers WHERE teacher_id = $1', [id]);
         await db.query('DELETE FROM teachers WHERE id = $1', [id]);
         await db.query('COMMIT');
-        
         res.json({ message: 'Teacher deleted successfully' });
     } catch (err) {
         await db.query('ROLLBACK');
-        console.error('Error deleting teacher:', err);
         res.status(500).json({ error: 'Server error deleting teacher' });
     }
 });
 
-// GET allocations for a specific teacher
 router.get('/:id/allocations', async (req, res) => {
     const { id } = req.params;
     try {
         const { rows } = await db.query(`
             SELECT 
-                tct.course_id, 
-                tct.timetable_id, 
-                c.course_title, 
-                c.course_code, 
+                tct.course_id, tct.timetable_id, c.course_title, c.course_code, 
                 CONCAT(t.stream, ' - Sem ', t.semester, ' (', t.batch_year, ')') as timetable_name
             FROM timetable_course_teachers tct
             JOIN courses c ON tct.course_id = c.id
@@ -105,19 +105,16 @@ router.get('/:id/allocations', async (req, res) => {
         `, [id]);
         res.json(rows);
     } catch (err) {
-        console.error('Error fetching allocations:', err);
         res.status(500).json({ error: 'Server error fetching allocations' });
     }
 });
 
-// POST (Update) allocations for a teacher
 router.post('/:id/allocations', async (req, res) => {
     const { id } = req.params;
     const { allocations } = req.body; 
 
     try {
         await db.query('BEGIN');
-        
         await db.query('DELETE FROM timetable_course_teachers WHERE teacher_id = $1', [id]);
 
         if (allocations && allocations.length > 0) {
@@ -130,37 +127,24 @@ router.post('/:id/allocations', async (req, res) => {
                 }
             }
         }
-
         await db.query('COMMIT');
         res.json({ message: 'Allocations updated successfully' });
     } catch (err) {
         await db.query('ROLLBACK');
-        console.error('Error updating allocations:', err);
         res.status(500).json({ error: 'Server error updating allocations' });
     }
 });
 
-// GET dropdown data for allocations
 router.get('/data/options', async (req, res) => {
     try {
         const courses = await db.query('SELECT id, course_title, course_code FROM courses ORDER BY course_title ASC');
-        const timetables = await db.query(`
-            SELECT id, CONCAT(stream, ' - Sem ', semester, ' (', batch_year, ')') as name 
-            FROM timetables 
-            ORDER BY batch_year DESC, stream ASC, semester ASC
-        `);
-        
-        res.json({
-            courses: courses.rows,
-            sections: timetables.rows
-        });
+        const timetables = await db.query(`SELECT id, CONCAT(stream, ' - Sem ', semester, ' (', batch_year, ')') as name FROM timetables ORDER BY batch_year DESC, stream ASC, semester ASC`);
+        res.json({ courses: courses.rows, sections: timetables.rows });
     } catch (err) {
-        console.error('Error fetching options:', err);
         res.status(500).json({ error: 'Server error fetching allocation options' });
     }
 });
 
-// POST /api/admin/teachers/upload-preview
 router.post('/upload-preview', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No Excel file provided' });
 
@@ -177,61 +161,41 @@ router.post('/upload-preview', upload.single('file'), async (req, res) => {
 
         rawData.forEach(row => {
             const fName = (row.FacultyName || row.Name || row.Teacher || row.Faculty || '')?.toString().trim();
-            const fEmail = (row.FacultyEmail || row.Email || '')?.toString().trim();
             const fType = (row.Type || row.TeacherType || 'Faculty')?.toString().trim();
+            if (!fName) return; 
 
-            if (!fName || !fEmail) return; 
+            let fEmail = enforceBMUEmail((row.FacultyEmail || row.Email || '')?.toString().trim(), fName);
 
             const isUpdate = existingEmails.has(fEmail);
             if (isUpdate && !parsedTeachers.has(fEmail)) {
                 totalUpdates++;
             }
 
-            parsedTeachers.set(fEmail, {
-                full_name: fName,
-                email: fEmail,
-                teacher_type: fType,
-                is_update: isUpdate
-            });
+            parsedTeachers.set(fEmail, { full_name: fName, email: fEmail, teacher_type: fType, is_update: isUpdate });
         });
 
-        res.json({
-            overwrites: {
-                total_updates: totalUpdates
-            },
-            preview: {
-                teachers: Array.from(parsedTeachers.values())
-            }
-        });
+        res.json({ overwrites: { total_updates: totalUpdates }, preview: { teachers: Array.from(parsedTeachers.values()) } });
     } catch (err) {
-        console.error('Error parsing Excel:', err);
         res.status(500).json({ error: 'Failed to process Excel file. Ensure it is a valid format.' });
     }
 });
 
-// POST /api/admin/teachers/commit-upload
 router.post('/commit-upload', async (req, res) => {
     const { teachers } = req.body;
-
-    if (!teachers || !Array.isArray(teachers)) {
-        return res.status(400).json({ error: 'Invalid teacher data provided' });
-    }
+    if (!teachers || !Array.isArray(teachers)) return res.status(400).json({ error: 'Invalid teacher data provided' });
 
     try {
         await db.query('BEGIN');
 
         for (const t of teachers) {
-            const checkRes = await db.query('SELECT id FROM teachers WHERE email = $1', [t.email]);
+            if (!t.full_name) continue;
+            const enforcedEmail = enforceBMUEmail(t.email, t.full_name);
+
+            const checkRes = await db.query('SELECT id FROM teachers WHERE email = $1', [enforcedEmail]);
             if (checkRes.rows.length > 0) {
-                await db.query(
-                    'UPDATE teachers SET full_name = $1, teacher_type = $2 WHERE email = $3', 
-                    [t.full_name, t.teacher_type, t.email]
-                );
+                await db.query('UPDATE teachers SET full_name = $1, teacher_type = $2 WHERE email = $3', [t.full_name, t.teacher_type, enforcedEmail]);
             } else {
-                await db.query(
-                    'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3)', 
-                    [t.full_name, t.email, t.teacher_type || 'Faculty']
-                );
+                await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3)', [t.full_name, enforcedEmail, t.teacher_type || 'Faculty']);
             }
         }
 
@@ -239,7 +203,6 @@ router.post('/commit-upload', async (req, res) => {
         res.json({ message: 'Teachers imported successfully from Excel.' });
     } catch (err) {
         await db.query('ROLLBACK');
-        console.error('Error committing teachers:', err);
         res.status(500).json({ error: 'Failed to save changes to database' });
     }
 });
