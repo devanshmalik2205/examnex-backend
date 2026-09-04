@@ -324,25 +324,38 @@ router.post('/timetables/:id/commit', async (req, res) => {
         }
 
         const courseIdMap = {}; 
-        for (const c of courses) {
+        
+        // 1. Process Courses with absolute null fallbacks to prevent pg-node crashes
+        for (const c of (courses || [])) {
+            if (!c.course_code) continue; 
+            
             let cRes = await db.query('SELECT id FROM courses WHERE course_code = $1', [c.course_code]);
-            let creditsVal = parseFloat(c.credits) || null;
+            let creditsVal = (c.credits && !isNaN(parseFloat(c.credits))) ? parseFloat(c.credits) : null;
+            
+            const cTitle = c.course_title || c.course_code;
+            const cCat = c.category || null;
+            const cAbbr = c.abbreviation || null;
+            const cLdp = c.ldp || null;
             
             if (cRes.rows.length > 0) {
-                await db.query('UPDATE courses SET course_title = $1, category = $2, abbreviation = $3, credits = $4, ldp = $5 WHERE id = $6', 
-                    [c.course_title, c.category, c.abbreviation, creditsVal, c.ldp, cRes.rows[0].id]);
+                await db.query(
+                    'UPDATE courses SET course_title = $1, category = $2, abbreviation = $3, credits = $4, ldp = $5 WHERE id = $6', 
+                    [cTitle, cCat, cAbbr, creditsVal, cLdp, cRes.rows[0].id]
+                );
                 courseIdMap[c.course_code] = cRes.rows[0].id;
             } else {
-                let newCRes = await db.query('INSERT INTO courses (course_code, course_title, category, abbreviation, credits, ldp) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id', 
-                    [c.course_code, c.course_title, c.category, c.abbreviation, creditsVal, c.ldp]);
+                let newCRes = await db.query(
+                    'INSERT INTO courses (course_code, course_title, category, abbreviation, credits, ldp) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id', 
+                    [c.course_code, cTitle, cCat, cAbbr, creditsVal, cLdp]
+                );
                 courseIdMap[c.course_code] = newCRes.rows[0].id;
             }
         }
 
-        for (const a of allocations) {
-            if(!a.faculty_email || !a.faculty_name) continue;
+        // 2. Process Allocations & Teachers safely
+        for (const a of (allocations || [])) {
+            if(!a.faculty_email || !a.faculty_name || !a.course_code) continue;
 
-            // Strict Domain/Format Enforcement Before DB Insert
             const emailPrefix = a.faculty_email.split('@')[0].trim().toLowerCase();
             const enforcedEmail = `${emailPrefix}@bmu.edu.in`;
 
@@ -353,27 +366,45 @@ router.post('/timetables/:id/commit', async (req, res) => {
                 await db.query('UPDATE teachers SET full_name = $1 WHERE id = $2', [a.faculty_name, tRes.rows[0].id]);
                 teacherId = tRes.rows[0].id;
             } else {
-                let newTRes = await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING id', 
-                    [a.faculty_name, enforcedEmail, 'Faculty']);
+                let newTRes = await db.query(
+                    'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING id', 
+                    [a.faculty_name, enforcedEmail, 'Faculty']
+                );
                 teacherId = newTRes.rows[0].id;
             }
             
             if (courseIdMap[a.course_code]) {
-                await db.query(`
-                    INSERT INTO timetable_course_teachers (teacher_id, course_id, timetable_id)
-                    VALUES ($1, $2, $3) ON CONFLICT DO NOTHING
-                `, [teacherId, courseIdMap[a.course_code], timetableId]);
+                // Manual duplication check instead of relying on exact ON CONFLICT constraints 
+                const existCheck = await db.query(
+                    'SELECT 1 FROM timetable_course_teachers WHERE teacher_id = $1 AND course_id = $2 AND timetable_id = $3',
+                    [teacherId, courseIdMap[a.course_code], timetableId]
+                );
+                
+                if (existCheck.rows.length === 0) {
+                    await db.query(`
+                        INSERT INTO timetable_course_teachers (teacher_id, course_id, timetable_id)
+                        VALUES ($1, $2, $3)
+                    `, [teacherId, courseIdMap[a.course_code], timetableId]);
+                }
             }
         }
 
+        // 3. Process Entries with absolute null fallbacks
         if (entries && entries.length > 0) {
             for (const e of entries) {
                 const courseId = courseIdMap[e.course_code] || null;
                 const entryType = (e.raw_entry === 'LUNCH' || e.entry_type === 'LUNCH') ? 'LUNCH' : 'CLASS';
+                
+                const day = e.day_of_week || null;
+                const start = e.start_time || null;
+                const end = e.end_time || null;
+                const room = e.room || null;
+                const raw = e.raw_entry || null;
+
                 await db.query(`
                     INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                `, [timetableId, courseId, e.day_of_week, e.start_time, e.end_time, e.room, e.raw_entry, entryType]);
+                `, [timetableId, courseId, day, start, end, room, raw, entryType]);
             }
         }
 
@@ -382,7 +413,8 @@ router.post('/timetables/:id/commit', async (req, res) => {
     } catch (err) {
         await db.query('ROLLBACK');
         console.error('Error committing changes:', err);
-        res.status(500).json({ error: 'Failed to save changes to database' });
+        // Providing specific database error messages directly back to the UI modal
+        res.status(500).json({ error: `Database Error: ${err.message || 'Failed to save changes.'}` });
     }
 });
 
