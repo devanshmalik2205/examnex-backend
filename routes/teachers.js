@@ -195,9 +195,10 @@ router.post('/commit-upload', async (req, res) => {
             if (!t.full_name) continue;
             const enforcedEmail = enforceBMUEmail(t.email, t.full_name);
 
-            const checkRes = await db.query('SELECT id FROM teachers WHERE email = $1', [enforcedEmail]);
+            // BROAD SEARCH to catch unique constraint collisions
+            const checkRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(full_name) = $2', [enforcedEmail, t.full_name.toLowerCase()]);
             if (checkRes.rows.length > 0) {
-                await db.query('UPDATE teachers SET full_name = $1, teacher_type = $2 WHERE email = $3', [t.full_name, t.teacher_type, enforcedEmail]);
+                await db.query('UPDATE teachers SET full_name = $1, email = $2, teacher_type = $3 WHERE id = $4', [t.full_name, enforcedEmail, t.teacher_type, checkRes.rows[0].id]);
             } else {
                 await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3)', [t.full_name, enforcedEmail, t.teacher_type || 'Faculty']);
             }

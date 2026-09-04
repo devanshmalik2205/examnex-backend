@@ -29,19 +29,18 @@ const parseTeachersList = (rawString) => {
 // Helper to generate dot-separated email (e.g., kiran.sharma@bmu.edu.in)
 const generateBMUEmail = (fullName) => {
     if (!fullName) return '';
-    // 1. Strip titles
+    // Strip titles, remove anything that isn't a letter/number/space, replace spaces with dots
     let cleanName = fullName.replace(/^(Dr\.|Dr\s|Mr\.|Mr\s|Mrs\.|Mrs\s|Ms\.|Ms\s|Prof\.|Prof\s|Er\.|Er\s)+/i, '').trim();
-    // 2. Remove anything that isn't a letter, number, or space
     cleanName = cleanName.replace(/[^a-zA-Z0-9\s]/g, '').trim();
-    // 3. Replace spaces with dots and lowercase
     cleanName = cleanName.replace(/\s+/g, '.').toLowerCase();
     
     return `${cleanName}@bmu.edu.in`;
 };
 
-// Helper to parse time headers like "9:00 AM - 9:55 AM" or "10:00 AM- 10:55 AM"
+// Helper to parse time headers, cleaning up Excel newline breaks (e.g., "9:00 AM-\n9:55 AM")
 const parseTimeHeader = (str) => {
-    const match = str.match(/(\d{1,2}:\d{2})\s*([AP]M)?\s*-\s*(\d{1,2}:\d{2})\s*([AP]M)?/i);
+    const normalizedStr = str.replace(/[\n\r]/g, ' ');
+    const match = normalizedStr.match(/(\d{1,2}:\d{2})\s*([AP]M)?\s*-\s*(\d{1,2}:\d{2})\s*([AP]M)?/i);
     if (!match) return null;
     
     let [_, startT, startM, endT, endM] = match;
@@ -128,10 +127,9 @@ router.delete('/timetables/:id', async (req, res) => {
 router.get('/timetables/:id', async (req, res) => {
     const timetableId = req.params.id;
     try {
-        // Including backwards compatibility if your DB uses entry_type, but keeping queries safe
         const entriesQuery = `
             SELECT 
-                te.id AS entry_id, te.day_of_week, te.start_time, te.end_time, te.room, te.raw_entry,
+                te.id AS entry_id, te.day_of_week, te.start_time, te.end_time, te.room, te.entry_type, te.raw_entry,
                 c.id AS course_id, c.course_code, c.abbreviation, c.course_title, c.category, c.sub_category, c.credits, c.ldp, c.course_type,
                 (
                     SELECT json_agg(json_build_object('id', t.id, 'full_name', t.full_name, 'email', t.email, 'type', t.teacher_type))
@@ -255,7 +253,7 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                             start_time: th.start,
                             end_time: th.end,
                             course_code: null, room: null,
-                            raw_entry: 'LUNCH'
+                            raw_entry: 'LUNCH', entry_type: 'LUNCH'
                         });
                         return;
                     }
@@ -328,7 +326,7 @@ router.post('/timetables/:id/commit', async (req, res) => {
             const creditsVal = (c.credits && !isNaN(parseFloat(c.credits))) ? parseFloat(c.credits) : null;
             const cLdp = c.ldp || null;
 
-            let cRes = await db.query('SELECT id FROM courses WHERE course_code = $1', [c.course_code]);
+            let cRes = await db.query('SELECT id FROM courses WHERE UPPER(course_code) = $1', [c.course_code.toUpperCase()]);
             
             if (cRes.rows.length > 0) {
                 await db.query(
@@ -339,7 +337,7 @@ router.post('/timetables/:id/commit', async (req, res) => {
             } else {
                 let newCRes = await db.query(
                     'INSERT INTO courses (course_code, course_title, category, abbreviation, credits, ldp) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id', 
-                    [c.course_code, cTitle, cCat, cAbbr, creditsVal, cLdp]
+                    [c.course_code.toUpperCase(), cTitle, cCat, cAbbr, creditsVal, cLdp]
                 );
                 courseIdMap[c.course_code] = newCRes.rows[0].id;
             }
@@ -351,11 +349,12 @@ router.post('/timetables/:id/commit', async (req, res) => {
             const emailPrefix = a.faculty_email.split('@')[0].trim().toLowerCase();
             const enforcedEmail = `${emailPrefix}@bmu.edu.in`;
 
-            let tRes = await db.query('SELECT id FROM teachers WHERE email = $1', [enforcedEmail]);
+            // BROAD SEARCH: Check if they exist under this exact email OR this exact full name to prevent Unique Constraint crashes.
+            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(full_name) = $2', [enforcedEmail, a.faculty_name.toLowerCase()]);
             let teacherId;
             
             if (tRes.rows.length > 0) {
-                await db.query('UPDATE teachers SET full_name = $1 WHERE id = $2', [a.faculty_name, tRes.rows[0].id]);
+                await db.query('UPDATE teachers SET full_name = $1, email = $2 WHERE id = $3', [a.faculty_name, enforcedEmail, tRes.rows[0].id]);
                 teacherId = tRes.rows[0].id;
             } else {
                 let newTRes = await db.query(
@@ -388,11 +387,12 @@ router.post('/timetables/:id/commit', async (req, res) => {
                 const courseId = courseIdMap[e.course_code] || null;
                 const room = e.room || 'TBA';
                 const raw = e.raw_entry || e.course_code || 'Session';
+                const entryType = (raw === 'LUNCH' || e.entry_type === 'LUNCH') ? 'LUNCH' : 'CLASS';
 
                 await db.query(`
-                    INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                `, [timetableId, courseId, e.day_of_week, e.start_time, e.end_time, room, raw]);
+                    INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                `, [timetableId, courseId, e.day_of_week, e.start_time, e.end_time, room, raw, entryType]);
             }
         }
 
@@ -401,7 +401,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
     } catch (err) {
         await db.query('ROLLBACK');
         console.error('Error committing changes:', err);
-        // Extract database specific errors to pass to frontend for easier debugging
         res.status(500).json({ error: err.detail || err.message || 'Failed to save changes to database' });
     }
 });
