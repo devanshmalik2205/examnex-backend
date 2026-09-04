@@ -7,15 +7,36 @@ const xlsx = require('xlsx');
 // Use memory storage for processing the file immediately
 const upload = multer({ storage: multer.memoryStorage() });
 
+// Helper function to clean names (Remove Dr., Mr., etc.)
+const cleanTeacherName = (name) => {
+    if (!name) return '';
+    let cleaned = name.trim();
+    // Strip connective prefixes like "With " or "And " occasionally found at the start
+    cleaned = cleaned.replace(/^(With\s+|And\s+)/i, '');
+    
+    // Strip titles case-insensitively
+    const prefixRegex = /^(Dr\.|Dr\s|Mr\.|Mr\s|Mrs\.|Mrs\s|Ms\.|Ms\s|Prof\.|Prof\s|Er\.|Er\s)+/i;
+    while (prefixRegex.test(cleaned)) {
+        cleaned = cleaned.replace(prefixRegex, '').trim();
+    }
+    return cleaned;
+};
+
+// Helper to split multiple teachers in a single cell
+const parseTeachersList = (rawString) => {
+    if (!rawString) return [];
+    // Split by " and ", "&", "/", ","
+    const parts = rawString.split(/\s+and\s+|\s*&\s*|\s*\/\s*|,/i);
+    return parts.map(p => cleanTeacherName(p)).filter(p => p.length > 0);
+};
+
 // GET /api/admin/stats
-// Fetches real statistics for the Quick Overview dashboard
 router.get('/stats', async (req, res) => {
     try {
         const examsResult = await db.query('SELECT COUNT(DISTINCT course_id) as total FROM timetable_entries');
         const studentsResult = await db.query('SELECT COUNT(*) as total FROM students');
         const roomsResult = await db.query('SELECT COUNT(DISTINCT room) as total FROM timetable_entries WHERE room IS NOT NULL');
         
-        // Simple clash detection: same room, same day, overlapping times
         const clashesResult = await db.query(`
             SELECT COUNT(*) as total 
             FROM timetable_entries t1
@@ -36,7 +57,6 @@ router.get('/stats', async (req, res) => {
 });
 
 // GET /api/admin/timetables
-// Fetches the list of all available timetables (Batches, Streams, Semesters)
 router.get('/timetables', async (req, res) => {
     try {
         const query = `
@@ -53,12 +73,10 @@ router.get('/timetables', async (req, res) => {
 });
 
 // GET /api/admin/timetables/:id
-// Fetches entries, course details, associated teachers, and enrolled students
 router.get('/timetables/:id', async (req, res) => {
     const timetableId = req.params.id;
 
     try {
-        // 1. Fetch entries with course info and mapped teachers
         const entriesQuery = `
             SELECT 
                 te.id AS entry_id, te.day_of_week, te.start_time, te.end_time, te.room, te.entry_type, te.raw_entry,
@@ -79,10 +97,8 @@ router.get('/timetables/:id', async (req, res) => {
             WHERE te.timetable_id = $1
             ORDER BY te.start_time ASC;
         `;
-        
         const { rows: entries } = await db.query(entriesQuery, [timetableId]);
 
-        // 2. Fetch students assigned to this timetable
         const studentsQuery = `
             SELECT s.id, s.registration_no, s.username, s.stream, s.email
             FROM students s
@@ -90,7 +106,6 @@ router.get('/timetables/:id', async (req, res) => {
             WHERE st.timetable_id = $1
             ORDER BY s.registration_no ASC;
         `;
-
         const { rows: students } = await db.query(studentsQuery, [timetableId]);
 
         res.json({
@@ -101,7 +116,6 @@ router.get('/timetables/:id', async (req, res) => {
                 total_students: students.length
             }
         });
-
     } catch (err) {
         console.error('Error fetching timetable details:', err);
         res.status(500).json({ message: 'Internal Server Error' });
@@ -109,62 +123,73 @@ router.get('/timetables/:id', async (req, res) => {
 });
 
 // POST /api/admin/timetables/:id/upload-preview
-// Handles Excel file upload, parses it, and returns a preview of changes
+// Handles Curriculum & Faculty Allocations layout
 router.post('/timetables/:id/upload-preview', upload.single('file'), async (req, res) => {
     const timetableId = req.params.id;
     
     if (!req.file) return res.status(400).json({ error: 'No Excel file provided' });
 
     try {
-        // Calculate potential overwrites (existing entries for this timetable)
-        const overwriteCheck = await db.query('SELECT COUNT(*) as count FROM timetable_entries WHERE timetable_id = $1', [timetableId]);
+        // Calculate potential overwrites for allocations specifically
+        const overwriteCheck = await db.query('SELECT COUNT(*) as count FROM timetable_course_teachers WHERE timetable_id = $1', [timetableId]);
         const totalDeleted = parseInt(overwriteCheck.rows[0].count) || 0;
 
-        // Parse Excel from memory buffer
         const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
         const rawData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
 
         const courses = new Map();
-        const teachers = new Map();
-        const entries = [];
+        const allocations = [];
+        const entries = []; 
 
         rawData.forEach(row => {
-            // Check for valid rows. Adjust these property names if your excel columns differ 
-            // e.g. row['Course Code'] instead of row.CourseCode
-            const cCode = (row.CourseCode || row.Course_Code || row.SubjectCode || '')?.toString().trim();
-            const day = (row.Day || row.Day_of_Week || row.Weekday || '')?.toString().trim();
+            const cCode = (row['Course Code'] || row.CourseCode || row.SubjectCode || '').toString().trim();
+            const cTitle = (row['Course'] || row.CourseTitle || row.Subject || '').toString().trim();
             
-            if (!cCode || !day) return; 
+            // If the row is missing fundamental course info, skip
+            if (!cCode) return; 
+
+            // Extract Course Details
+            const abbreviation = (row['Course Title Abbreviation'] || row.Abbreviation || '').toString().trim();
+            const category = (row['Category'] || '').toString().trim();
+            let credits = (row['Credits'] || '').toString().trim();
+            const ldp = (row['LDP'] || '').toString().trim();
 
             if (!courses.has(cCode)) {
                 courses.set(cCode, {
                     course_code: cCode,
-                    course_title: row.CourseTitle || row.Subject || cCode,
-                    category: row.Category || 'Core'
+                    course_title: cTitle || cCode,
+                    abbreviation,
+                    category,
+                    credits,
+                    ldp
                 });
             }
 
-            const fName = row.FacultyName || row.Teacher || row.Faculty;
-            if (fName) {
-                const fEmail = row.FacultyEmail || row.Email || `${fName.replace(/\s+/g, '').toLowerCase()}@university.edu`;
-                if (!teachers.has(fEmail)) {
-                    teachers.set(fEmail, {
-                        full_name: fName,
-                        email: fEmail,
-                        linked_course_code: cCode
-                    });
-                }
-            }
-
-            entries.push({
-                day_of_week: day.substring(0, 3).toUpperCase(), // E.g., MON, TUE
-                start_time: row.StartTime || '09:00:00',
-                end_time: row.EndTime || '09:55:00',
-                course_code: cCode,
-                room: row.Room || row.Classroom || 'TBA',
-                raw_entry: row.CourseTitle || cCode
+            // Extract Faculty mapping (Clean and Split logic)
+            const rawFaculty = (row['Course Faculty'] || row['Faculty Name'] || row.Teacher || row.Faculty || '').toString().trim();
+            const facultyNames = parseTeachersList(rawFaculty);
+            
+            facultyNames.forEach(fName => {
+                const fEmail = `${fName.replace(/\s+/g, '').toLowerCase()}@university.edu`;
+                allocations.push({
+                    course_code: cCode,
+                    faculty_name: fName,
+                    faculty_email: fEmail
+                });
             });
+
+            // Backward compatibility for standard timetable layout inclusion
+            if (row.Day && row.StartTime && row.EndTime) {
+                entries.push({
+                    day_of_week: row.Day.substring(0, 3).toUpperCase(),
+                    start_time: row.StartTime,
+                    end_time: row.EndTime,
+                    course_code: cCode,
+                    room: row.Room || row.Classroom || row.Schedule || 'TBA',
+                    raw_entry: row.CourseTitle || cCode
+                });
+            }
         });
 
         res.json({
@@ -173,78 +198,86 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
             },
             preview: {
                 courses: Array.from(courses.values()),
-                teachers: Array.from(teachers.values()),
+                allocations: allocations,
                 entries: entries
             }
         });
     } catch (err) {
         console.error('Error parsing Excel:', err);
-        res.status(500).json({ error: 'Failed to process Excel file. Ensure it is a valid .xlsx or .csv format.' });
+        res.status(500).json({ error: 'Failed to process Excel file. Ensure it matches the template.' });
     }
 });
 
 // POST /api/admin/timetables/:id/commit
-// Commits the parsed Excel preview data to the database safely
 router.post('/timetables/:id/commit', async (req, res) => {
     const timetableId = req.params.id;
-    const { courses, teachers, entries } = req.body;
+    const { courses, allocations, entries } = req.body;
 
     try {
         await db.query('BEGIN');
 
-        // 1. Wipe existing entries and allocations for this timetable to prevent overlaps
-        await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [timetableId]);
+        // 1. Wipe existing allocations for this timetable
         await db.query('DELETE FROM timetable_course_teachers WHERE timetable_id = $1', [timetableId]);
 
         // 2. Insert or fetch existing Courses
-        const courseIdMap = {}; // Maps course_code to DB id
+        const courseIdMap = {}; 
         for (const c of courses) {
             let cRes = await db.query('SELECT id FROM courses WHERE course_code = $1', [c.course_code]);
+            let creditsVal = parseFloat(c.credits) || null;
+            
             if (cRes.rows.length > 0) {
-                await db.query('UPDATE courses SET course_title = $1, category = $2 WHERE id = $3', [c.course_title, c.category, cRes.rows[0].id]);
+                await db.query('UPDATE courses SET course_title = $1, category = $2, abbreviation = $3, credits = $4, ldp = $5 WHERE id = $6', 
+                    [c.course_title, c.category, c.abbreviation, creditsVal, c.ldp, cRes.rows[0].id]);
                 courseIdMap[c.course_code] = cRes.rows[0].id;
             } else {
-                let newCRes = await db.query('INSERT INTO courses (course_code, course_title, category) VALUES ($1, $2, $3) RETURNING id', [c.course_code, c.course_title, c.category]);
+                let newCRes = await db.query('INSERT INTO courses (course_code, course_title, category, abbreviation, credits, ldp) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id', 
+                    [c.course_code, c.course_title, c.category, c.abbreviation, creditsVal, c.ldp]);
                 courseIdMap[c.course_code] = newCRes.rows[0].id;
             }
         }
 
         // 3. Insert or fetch existing Teachers & Link them
-        for (const t of teachers) {
-            let tRes = await db.query('SELECT id FROM teachers WHERE email = $1', [t.email]);
+        for (const a of allocations) {
+            if(!a.faculty_email || !a.faculty_name) continue;
+
+            let tRes = await db.query('SELECT id FROM teachers WHERE email = $1', [a.faculty_email]);
             let teacherId;
+            
             if (tRes.rows.length > 0) {
-                await db.query('UPDATE teachers SET full_name = $1 WHERE id = $2', [t.full_name, tRes.rows[0].id]);
+                await db.query('UPDATE teachers SET full_name = $1 WHERE id = $2', [a.faculty_name, tRes.rows[0].id]);
                 teacherId = tRes.rows[0].id;
             } else {
-                let newTRes = await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING id', [t.full_name, t.email, 'Faculty']);
+                let newTRes = await db.query('INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3) RETURNING id', 
+                    [a.faculty_name, a.faculty_email, 'Faculty']);
                 teacherId = newTRes.rows[0].id;
             }
             
-            // Map teacher to course for this timetable
-            if (t.linked_course_code && courseIdMap[t.linked_course_code]) {
+            if (courseIdMap[a.course_code]) {
                 await db.query(`
                     INSERT INTO timetable_course_teachers (teacher_id, course_id, timetable_id)
                     VALUES ($1, $2, $3)
                     ON CONFLICT DO NOTHING
-                `, [teacherId, courseIdMap[t.linked_course_code], timetableId]);
+                `, [teacherId, courseIdMap[a.course_code], timetableId]);
             }
         }
 
-        // 4. Insert Entries
-        for (const e of entries) {
-            const courseId = courseIdMap[e.course_code] || null;
-            await db.query(`
-                INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-            `, [timetableId, courseId, e.day_of_week, e.start_time, e.end_time, e.room, e.raw_entry]);
+        // 4. Update Time slots ONLY IF included (backwards compatibility)
+        if (entries && entries.length > 0) {
+            await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [timetableId]);
+            for (const e of entries) {
+                const courseId = courseIdMap[e.course_code] || null;
+                await db.query(`
+                    INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                `, [timetableId, courseId, e.day_of_week, e.start_time, e.end_time, e.room, e.raw_entry]);
+            }
         }
 
         await db.query('COMMIT');
-        res.json({ message: 'Timetable updated successfully from Excel.' });
+        res.json({ message: 'Curriculum & Allocations updated successfully from Excel.' });
     } catch (err) {
         await db.query('ROLLBACK');
-        console.error('Error committing timetable:', err);
+        console.error('Error committing curriculum allocations:', err);
         res.status(500).json({ error: 'Failed to save changes to database' });
     }
 });

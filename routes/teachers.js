@@ -4,13 +4,33 @@ const db = require('../config/db');
 const multer = require('multer');
 const xlsx = require('xlsx');
 
-// Use memory storage for processing the file immediately
 const upload = multer({ storage: multer.memoryStorage() });
 
-// GET all teachers
+// GET all teachers alongside all their aggregated subjects & class allocations
 router.get('/', async (req, res) => {
     try {
-        const { rows } = await db.query('SELECT id, full_name, email, teacher_type FROM teachers ORDER BY full_name ASC');
+        const query = `
+            SELECT 
+                t.id, t.full_name, t.email, t.teacher_type,
+                COALESCE(
+                    json_agg(
+                        json_build_object(
+                            'course_code', c.course_code,
+                            'course_title', c.course_title,
+                            'stream', tb.stream,
+                            'semester', tb.semester,
+                            'batch', tb.batch_year
+                        )
+                    ) FILTER (WHERE c.id IS NOT NULL), '[]'
+                ) as allocations
+            FROM teachers t
+            LEFT JOIN timetable_course_teachers tct ON t.id = tct.teacher_id
+            LEFT JOIN courses c ON tct.course_id = c.id
+            LEFT JOIN timetables tb ON tct.timetable_id = tb.id
+            GROUP BY t.id
+            ORDER BY t.full_name ASC
+        `;
+        const { rows } = await db.query(query);
         res.json(rows);
     } catch (err) {
         console.error('Error fetching teachers:', err);
@@ -54,7 +74,6 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
     const { id } = req.params;
     try {
-        // We should first remove allocations before deleting the teacher to avoid foreign key constraint violations
         await db.query('BEGIN');
         await db.query('DELETE FROM timetable_course_teachers WHERE teacher_id = $1', [id]);
         await db.query('DELETE FROM teachers WHERE id = $1', [id]);
@@ -142,16 +161,13 @@ router.get('/data/options', async (req, res) => {
 });
 
 // POST /api/admin/teachers/upload-preview
-// Handles Excel file upload, parses it, and returns a preview of changes
 router.post('/upload-preview', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No Excel file provided' });
 
     try {
-        // Fetch existing teachers to calculate overwrites
         const existingRes = await db.query('SELECT email FROM teachers');
         const existingEmails = new Set(existingRes.rows.map(r => r.email));
 
-        // Parse Excel from memory buffer
         const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
         const rawData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
@@ -194,7 +210,6 @@ router.post('/upload-preview', upload.single('file'), async (req, res) => {
 });
 
 // POST /api/admin/teachers/commit-upload
-// Commits the parsed Excel preview data to the database safely
 router.post('/commit-upload', async (req, res) => {
     const { teachers } = req.body;
 
@@ -206,17 +221,13 @@ router.post('/commit-upload', async (req, res) => {
         await db.query('BEGIN');
 
         for (const t of teachers) {
-            // Check if teacher exists by email
             const checkRes = await db.query('SELECT id FROM teachers WHERE email = $1', [t.email]);
-            
             if (checkRes.rows.length > 0) {
-                // Update existing teacher (keeps their ID, thus preserving allocations)
                 await db.query(
                     'UPDATE teachers SET full_name = $1, teacher_type = $2 WHERE email = $3', 
                     [t.full_name, t.teacher_type, t.email]
                 );
             } else {
-                // Insert new teacher
                 await db.query(
                     'INSERT INTO teachers (full_name, email, teacher_type) VALUES ($1, $2, $3)', 
                     [t.full_name, t.email, t.teacher_type || 'Faculty']
