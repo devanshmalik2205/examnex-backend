@@ -62,13 +62,52 @@ router.get('/timetables', async (req, res) => {
         const query = `
             SELECT id, batch_year, stream, semester, source_sheet 
             FROM timetables 
-            ORDER BY batch_year DESC, stream ASC;
+            ORDER BY batch_year DESC, stream ASC, semester ASC;
         `;
         const { rows } = await db.query(query);
         res.json(rows);
     } catch (err) {
         console.error('Error fetching timetables:', err);
         res.status(500).json({ message: 'Internal Server Error' });
+    }
+});
+
+// POST /api/admin/timetables (Create a new Section/Class)
+router.post('/timetables', async (req, res) => {
+    const { batch_year, stream, semester } = req.body;
+    try {
+        const { rows } = await db.query(
+            'INSERT INTO timetables (batch_year, stream, semester) VALUES ($1, $2, $3) RETURNING *',
+            [batch_year, stream, semester]
+        );
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        console.error('Error creating section:', err);
+        if (err.code === '23505') {
+            return res.status(400).json({ error: 'This specific Batch, Stream, and Semester combination already exists.' });
+        }
+        res.status(500).json({ error: 'Failed to create section.' });
+    }
+});
+
+// DELETE /api/admin/timetables/:id (Delete a Section/Class)
+router.delete('/timetables/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.query('BEGIN');
+        // Delete dependent relationships first
+        await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [id]);
+        await db.query('DELETE FROM timetable_course_teachers WHERE timetable_id = $1', [id]);
+        await db.query('DELETE FROM student_timetable WHERE timetable_id = $1', [id]);
+        
+        // Delete the timetable itself
+        await db.query('DELETE FROM timetables WHERE id = $1', [id]);
+        await db.query('COMMIT');
+        res.json({ message: 'Section deleted successfully.' });
+    } catch (err) {
+        await db.query('ROLLBACK');
+        console.error('Error deleting section:', err);
+        res.status(500).json({ error: 'Failed to delete section.' });
     }
 });
 
@@ -123,16 +162,18 @@ router.get('/timetables/:id', async (req, res) => {
 });
 
 // POST /api/admin/timetables/:id/upload-preview
-// Handles Curriculum & Faculty Allocations layout
+// Handles Curriculum, Faculty Allocations, and Schedule extraction
 router.post('/timetables/:id/upload-preview', upload.single('file'), async (req, res) => {
     const timetableId = req.params.id;
     
     if (!req.file) return res.status(400).json({ error: 'No Excel file provided' });
 
     try {
-        // Calculate potential overwrites for allocations specifically
-        const overwriteCheck = await db.query('SELECT COUNT(*) as count FROM timetable_course_teachers WHERE timetable_id = $1', [timetableId]);
-        const totalDeleted = parseInt(overwriteCheck.rows[0].count) || 0;
+        const overwriteCheckAllocations = await db.query('SELECT COUNT(*) as count FROM timetable_course_teachers WHERE timetable_id = $1', [timetableId]);
+        const overwriteCheckEntries = await db.query('SELECT COUNT(*) as count FROM timetable_entries WHERE timetable_id = $1', [timetableId]);
+        
+        const totalAllocationsDeleted = parseInt(overwriteCheckAllocations.rows[0].count) || 0;
+        const totalEntriesDeleted = parseInt(overwriteCheckEntries.rows[0].count) || 0;
 
         const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
@@ -179,22 +220,28 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                 });
             });
 
-            // Backward compatibility for standard timetable layout inclusion
-            if (row.Day && row.StartTime && row.EndTime) {
+            // Extract Standard Timetable Layout (Day, Time, Room) if present
+            const day = (row.Day || row.Day_of_Week || row.Weekday || '').toString().trim();
+            const start = (row.StartTime || row['Start Time'] || row.Start || '').toString().trim();
+            const end = (row.EndTime || row['End Time'] || row.End || '').toString().trim();
+            const room = (row.Room || row.Classroom || row['Room No'] || row['Room No.'] || 'TBA').toString().trim();
+
+            if (day && start && end) {
                 entries.push({
-                    day_of_week: row.Day.substring(0, 3).toUpperCase(),
-                    start_time: row.StartTime,
-                    end_time: row.EndTime,
+                    day_of_week: day.substring(0, 3).toUpperCase(),
+                    start_time: start,
+                    end_time: end,
                     course_code: cCode,
-                    room: row.Room || row.Classroom || row.Schedule || 'TBA',
-                    raw_entry: row.CourseTitle || cCode
+                    room: room,
+                    raw_entry: cTitle || cCode
                 });
             }
         });
 
         res.json({
             overwrites: {
-                total_entries_deleted: totalDeleted
+                total_allocations_deleted: totalAllocationsDeleted,
+                total_entries_deleted: totalEntriesDeleted
             },
             preview: {
                 courses: Array.from(courses.values()),
@@ -216,8 +263,13 @@ router.post('/timetables/:id/commit', async (req, res) => {
     try {
         await db.query('BEGIN');
 
-        // 1. Wipe existing allocations for this timetable
+        // 1. Wipe existing allocations and entries for this timetable
         await db.query('DELETE FROM timetable_course_teachers WHERE timetable_id = $1', [timetableId]);
+        
+        // Only wipe entries if new entries are being uploaded in this excel file
+        if (entries && entries.length > 0) {
+            await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [timetableId]);
+        }
 
         // 2. Insert or fetch existing Courses
         const courseIdMap = {}; 
@@ -261,9 +313,8 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
-        // 4. Update Time slots ONLY IF included (backwards compatibility)
+        // 4. Update Time slots ONLY IF included 
         if (entries && entries.length > 0) {
-            await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [timetableId]);
             for (const e of entries) {
                 const courseId = courseIdMap[e.course_code] || null;
                 await db.query(`
@@ -274,10 +325,10 @@ router.post('/timetables/:id/commit', async (req, res) => {
         }
 
         await db.query('COMMIT');
-        res.json({ message: 'Curriculum & Allocations updated successfully from Excel.' });
+        res.json({ message: 'Curriculum, Allocations, and Schedule updated successfully.' });
     } catch (err) {
         await db.query('ROLLBACK');
-        console.error('Error committing curriculum allocations:', err);
+        console.error('Error committing changes:', err);
         res.status(500).json({ error: 'Failed to save changes to database' });
     }
 });
