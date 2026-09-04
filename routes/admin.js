@@ -7,20 +7,15 @@ const bcrypt = require('bcryptjs');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Drop the restrictive constraint quietly so we can add new teacher roles
 const dropTeacherConstraint = async () => {
-    try {
-        await db.query('ALTER TABLE teachers DROP CONSTRAINT IF EXISTS teachers_teacher_type_check;');
-    } catch (e) {}
+    try { await db.query('ALTER TABLE teachers DROP CONSTRAINT IF EXISTS teachers_teacher_type_check;'); } catch (e) {}
 };
 
 const cleanTeacherName = (name) => {
     if (!name) return '';
     let cleaned = name.trim().replace(/^(With\s+|And\s+)/i, '');
     const prefixRegex = /^(Dr\.|Dr\s|Mr\.|Mr\s|Mrs\.|Mrs\s|Ms\.|Ms\s|Prof\.|Prof\s|Er\.|Er\s)+/i;
-    while (prefixRegex.test(cleaned)) {
-        cleaned = cleaned.replace(prefixRegex, '').trim();
-    }
+    while (prefixRegex.test(cleaned)) { cleaned = cleaned.replace(prefixRegex, '').trim(); }
     return cleaned;
 };
 
@@ -108,12 +103,10 @@ router.delete('/timetables/:id', async (req, res) => {
 router.get('/timetables/:id', async (req, res) => {
     const timetableId = req.params.id;
     try {
-        // --- AUTO-HEALING STUDENT LINKAGE ---
         const ttInfo = await db.query('SELECT batch_year, stream FROM timetables WHERE id = $1', [timetableId]);
         if (ttInfo.rows.length > 0) {
             const { batch_year, stream } = ttInfo.rows[0];
             const yearPrefix = batch_year.toString().substring(2, 4); 
-            
             await db.query(`
                 INSERT INTO student_timetable (student_id, timetable_id)
                 SELECT id, $1 FROM students
@@ -146,9 +139,7 @@ router.get('/timetables/:id', async (req, res) => {
         const { rows: students } = await db.query(studentsQuery, [timetableId]);
 
         res.json({ entries, students, stats: { total_classes: entries.length, total_students: students.length } });
-    } catch (err) {
-        res.status(500).json({ message: 'Internal Server Error' });
-    }
+    } catch (err) { res.status(500).json({ message: 'Internal Server Error' }); }
 });
 
 router.post('/timetables/:id/upload-preview', upload.single('file'), async (req, res) => {
@@ -248,13 +239,10 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
 
                         let guessedCode = null;
                         let guessedRoom = 'TBA';
-                        
-                        // Updated regex: Prioritize explicit room names (GA202B, NB 311) over generic words like LAB
                         const roomMatch = cls.match(/\b([A-Z]{2}\s?\d{3}[A-Z]?|WORKSHOP|MDC|MPH)\b/i);
                         if (roomMatch) {
                             guessedRoom = roomMatch[1].toUpperCase();
                         } else if (cls.match(/\bLAB\b/i)) {
-                            // If no specific room is found but LAB is present, fallback to LAB
                             guessedRoom = 'LAB';
                         }
 
@@ -276,21 +264,37 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
             overwrites: { total_allocations_deleted: totalAllocationsDeleted, total_entries_deleted: totalEntriesDeleted },
             preview: { courses: Array.from(courses.values()), allocations: allocations, entries: entries }
         });
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to process Excel file. Ensure it matches the template.' });
-    }
+    } catch (err) { res.status(500).json({ error: 'Failed to process Excel file.' }); }
 });
 
 router.post('/timetables/:id/commit', async (req, res) => {
     const timetableId = req.params.id;
-    const { courses, allocations, entries } = req.body;
+    const { courses, allocations, entries, isGlobalImport } = req.body; // isGlobalImport flag added
 
     await dropTeacherConstraint(); 
 
     try {
         await db.query('BEGIN');
-        await db.query('DELETE FROM timetable_course_teachers WHERE timetable_id = $1', [timetableId]);
-        if (entries && entries.length > 0) { await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [timetableId]); }
+        
+        let targetTimetableIds = [timetableId];
+
+        // If Global Import, find ALL timetables matching the Year and Semester of the targeted one
+        if (isGlobalImport) {
+            const ttInfo = await db.query('SELECT batch_year, semester FROM timetables WHERE id = $1', [timetableId]);
+            if (ttInfo.rows.length > 0) {
+                const { batch_year, semester } = ttInfo.rows[0];
+                const allMatching = await db.query('SELECT id FROM timetables WHERE batch_year = $1 AND semester = $2', [batch_year, semester]);
+                targetTimetableIds = allMatching.rows.map(r => r.id);
+            }
+        }
+
+        // Delete dependencies for all target timetables before inserting
+        for (const tId of targetTimetableIds) {
+            await db.query('DELETE FROM timetable_course_teachers WHERE timetable_id = $1', [tId]);
+            if (entries && entries.length > 0) { 
+                await db.query('DELETE FROM timetable_entries WHERE timetable_id = $1', [tId]); 
+            }
+        }
 
         // --- Courses ---
         const courseIdMap = {}; 
@@ -358,35 +362,39 @@ router.post('/timetables/:id/commit', async (req, res) => {
             teacherIdMap[email] = teacherId;
         }
 
-        // --- Allocations ---
-        for (const a of (allocations || [])) {
-            if(!a.faculty_email || !a.faculty_name || !a.course_code) continue;
-            const enforcedEmail = `${a.faculty_email.split('@')[0].trim().toLowerCase()}@bmu.edu.in`;
-            const teacherId = teacherIdMap[enforcedEmail];
-            const courseId = courseIdMap[a.course_code];
+        // --- Allocations (Apply to all target timetables) ---
+        for (const tId of targetTimetableIds) {
+            for (const a of (allocations || [])) {
+                if(!a.faculty_email || !a.faculty_name || !a.course_code) continue;
+                const enforcedEmail = `${a.faculty_email.split('@')[0].trim().toLowerCase()}@bmu.edu.in`;
+                const teacherId = teacherIdMap[enforcedEmail];
+                const courseId = courseIdMap[a.course_code];
 
-            if (teacherId && courseId) {
-                const existCheck = await db.query('SELECT 1 FROM timetable_course_teachers WHERE teacher_id = $1 AND course_id = $2 AND timetable_id = $3', [teacherId, courseId, timetableId]);
-                if (existCheck.rows.length === 0) {
-                    await db.query('INSERT INTO timetable_course_teachers (teacher_id, course_id, timetable_id) VALUES ($1, $2, $3)', [teacherId, courseId, timetableId]);
+                if (teacherId && courseId) {
+                    const existCheck = await db.query('SELECT 1 FROM timetable_course_teachers WHERE teacher_id = $1 AND course_id = $2 AND timetable_id = $3', [teacherId, courseId, tId]);
+                    if (existCheck.rows.length === 0) {
+                        await db.query('INSERT INTO timetable_course_teachers (teacher_id, course_id, timetable_id) VALUES ($1, $2, $3)', [teacherId, courseId, tId]);
+                    }
                 }
             }
         }
 
-        // --- Entries ---
+        // --- Entries (Apply to all target timetables) ---
         if (entries && entries.length > 0) {
-            for (const e of entries) {
-                if (!e.day_of_week || !e.start_time || !e.end_time) continue; 
-                const courseId = courseIdMap[e.course_code] || null;
-                const room = e.room || 'TBA';
-                const raw = e.raw_entry || e.course_code || 'Session';
-                const entryType = (raw === 'LUNCH' || e.entry_type === 'LUNCH') ? 'LUNCH' : 'CLASS';
+            for (const tId of targetTimetableIds) {
+                for (const e of entries) {
+                    if (!e.day_of_week || !e.start_time || !e.end_time) continue; 
+                    const courseId = courseIdMap[e.course_code] || null;
+                    const room = e.room || 'TBA';
+                    const raw = e.raw_entry || e.course_code || 'Session';
+                    const entryType = (raw === 'LUNCH' || e.entry_type === 'LUNCH') ? 'LUNCH' : 'CLASS';
 
-                await db.query(`INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [timetableId, courseId, e.day_of_week, e.start_time, e.end_time, room, raw, entryType]);
+                    await db.query(`INSERT INTO timetable_entries (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [tId, courseId, e.day_of_week, e.start_time, e.end_time, room, raw, entryType]);
+                }
             }
         }
 
-        // Relink students automatically at commit
+        // Relink students to the primary timetable just to be safe
         const ttInfo = await db.query('SELECT batch_year, stream FROM timetables WHERE id = $1', [timetableId]);
         if (ttInfo.rows.length > 0) {
             const { batch_year, stream } = ttInfo.rows[0];
