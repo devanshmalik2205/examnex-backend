@@ -26,6 +26,14 @@ const parseTeachersList = (rawString) => {
     return parts.map(p => cleanTeacherName(p)).filter(p => p.length > 0);
 };
 
+// Helper to generate dot-separated email (e.g., kiran.sharma@bmu.edu.in)
+const generateBMUEmail = (fullName) => {
+    if (!fullName) return '';
+    // Remove extra spaces and special chars, replace spaces with dots
+    const cleaned = fullName.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '.').toLowerCase();
+    return `${cleaned}@bmu.edu.in`;
+};
+
 // Helper to parse time headers like "9:00 AM - 9:55 AM" or "10:00 AM- 10:55 AM"
 const parseTimeHeader = (str) => {
     const match = str.match(/(\d{1,2}:\d{2})\s*([AP]M)?\s*-\s*(\d{1,2}:\d{2})\s*([AP]M)?/i);
@@ -221,8 +229,7 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                 if (rawFaculty) {
                     const fNames = parseTeachersList(rawFaculty);
                     fNames.forEach(fName => {
-                        const cleanName = fName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-                        const fEmail = `${cleanName}@bmu.edu.in`; // Enforce @bmu.edu.in
+                        const fEmail = generateBMUEmail(fName); // Create dotted email
                         allocations.push({ course_code: cCode, faculty_name: fName, faculty_email: fEmail });
                     });
                 }
@@ -335,7 +342,7 @@ router.post('/timetables/:id/commit', async (req, res) => {
         for (const a of allocations) {
             if(!a.faculty_email || !a.faculty_name) continue;
 
-            // Strict Domain Enforcement Before DB Insert
+            // Strict Domain/Format Enforcement Before DB Insert
             const emailPrefix = a.faculty_email.split('@')[0].trim().toLowerCase();
             const enforcedEmail = `${emailPrefix}@bmu.edu.in`;
 

@@ -6,13 +6,17 @@ const xlsx = require('xlsx');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Helper to strictly enforce domain
+// Helper to strictly enforce dotted format and domain
 const enforceBMUEmail = (email, name) => {
     if (!email) {
         if (!name) return '';
-        return `${name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}@bmu.edu.in`;
+        // Create dotted email: kiran.sharma@bmu.edu.in
+        const cleaned = name.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '.').toLowerCase();
+        return `${cleaned}@bmu.edu.in`;
     }
-    return `${email.split('@')[0].trim().toLowerCase()}@bmu.edu.in`;
+    // If they typed something like user.name@gmail.com, force it to @bmu.edu.in
+    const emailPrefix = email.split('@')[0].trim().toLowerCase();
+    return `${emailPrefix}@bmu.edu.in`;
 };
 
 router.get('/', async (req, res) => {
