@@ -108,12 +108,10 @@ router.delete('/timetables/:id', async (req, res) => {
 router.get('/timetables/:id', async (req, res) => {
     const timetableId = req.params.id;
     try {
-        // --- AUTO-HEALING STUDENT LINKAGE ---
-        // Dynamically links students using the 2-digit year from registration_no + Stream matching
         const ttInfo = await db.query('SELECT batch_year, stream FROM timetables WHERE id = $1', [timetableId]);
         if (ttInfo.rows.length > 0) {
             const { batch_year, stream } = ttInfo.rows[0];
-            const yearPrefix = batch_year.toString().substring(2, 4); // "24" for 2024
+            const yearPrefix = batch_year.toString().substring(2, 4); 
             
             await db.query(`
                 INSERT INTO student_timetable (student_id, timetable_id)
@@ -249,7 +247,9 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
 
                         let guessedCode = null;
                         let guessedRoom = 'TBA';
-                        const roomMatch = cls.match(/\b([A-Z]{1,3}\d{3}[A-Z]?|LAB|MDC|MPH)\b/i);
+                        
+                        // Enhanced regex to extract rooms like NB 311, GA202B, GA 204, LAB, MDC, WORKSHOP
+                        const roomMatch = cls.match(/\b([A-Z]{2}\s?\d{3}[A-Z]?|LAB|MDC|MPH|WORKSHOP)\b/i);
                         if (roomMatch) guessedRoom = roomMatch[1].toUpperCase();
 
                         for (const [abbr, code] of Object.entries(abbrToCode)) {
@@ -279,7 +279,7 @@ router.post('/timetables/:id/commit', async (req, res) => {
     const timetableId = req.params.id;
     const { courses, allocations, entries } = req.body;
 
-    await dropTeacherConstraint(); // Remove restriction for DB safety
+    await dropTeacherConstraint(); 
 
     try {
         await db.query('BEGIN');
