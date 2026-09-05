@@ -166,8 +166,9 @@ router.post('/upload-preview', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No Excel file provided' });
 
     try {
-        const existingRes = await db.query('SELECT email FROM teachers');
-        const existingEmails = new Set(existingRes.rows.map(r => r.email));
+        // Fetch full existing teacher details to match by either Email OR Full Name
+        const existingRes = await db.query('SELECT id, full_name, email, teacher_type FROM teachers');
+        const existingTeachers = existingRes.rows;
 
         const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
@@ -175,23 +176,59 @@ router.post('/upload-preview', upload.single('file'), async (req, res) => {
 
         const parsedTeachers = new Map();
         let totalUpdates = 0;
+        let totalEmailUpdates = 0;
 
         rawData.forEach(row => {
-            const fName = (row.FacultyName || row.Name || row.Teacher || row.Faculty || '')?.toString().trim();
-            const fType = (row.Type || row.TeacherType || 'Assistant Prof.')?.toString().trim();
+            // Robust parsing of potential Excel Column Headers
+            const fName = (row.FacultyName || row['Faculty Name'] || row.Name || row['Full Name'] || row.Teacher || row.Faculty || '')?.toString().trim();
+            const fType = (row.Type || row.TeacherType || row.Role || row.Designation || 'Assistant Prof.')?.toString().trim();
             if (!fName) return; 
 
-            let fEmail = enforceBMUEmail((row.FacultyEmail || row.Email || '')?.toString().trim(), fName);
+            let providedEmail = (row.FacultyEmail || row.Email || row['Email Address'] || row['Email ID'] || '')?.toString().trim();
+            let fEmail = enforceBMUEmail(providedEmail, fName);
 
-            const isUpdate = existingEmails.has(fEmail);
+            let isUpdate = false;
+            let updateDetails = [];
+
+            // Find matching teacher by EXACT Name OR EXACT Email (case insensitive)
+            const match = existingTeachers.find(t => 
+                t.email.toLowerCase() === fEmail.toLowerCase() || 
+                t.full_name.toLowerCase() === fName.toLowerCase()
+            );
+
+            if (match) {
+                isUpdate = true;
+                
+                // Track specifically what is updating
+                if (match.email.toLowerCase() !== fEmail.toLowerCase()) {
+                    updateDetails.push(`Email: ${match.email} ➔ ${fEmail}`);
+                    if (!parsedTeachers.has(fEmail)) totalEmailUpdates++;
+                }
+                if (match.full_name !== fName) {
+                    updateDetails.push(`Name: ${match.full_name} ➔ ${fName}`);
+                }
+                if (match.teacher_type !== fType) {
+                    updateDetails.push(`Role: ${match.teacher_type} ➔ ${fType}`);
+                }
+            }
+
             if (isUpdate && !parsedTeachers.has(fEmail)) {
                 totalUpdates++;
             }
 
-            parsedTeachers.set(fEmail, { full_name: fName, email: fEmail, teacher_type: fType, is_update: isUpdate });
+            parsedTeachers.set(fEmail, { 
+                full_name: fName, 
+                email: fEmail, 
+                teacher_type: fType, 
+                is_update: isUpdate,
+                update_details: updateDetails
+            });
         });
 
-        res.json({ overwrites: { total_updates: totalUpdates }, preview: { teachers: Array.from(parsedTeachers.values()) } });
+        res.json({ 
+            overwrites: { total_updates: totalUpdates, email_updates: totalEmailUpdates }, 
+            preview: { teachers: Array.from(parsedTeachers.values()) } 
+        });
     } catch (err) {
         res.status(500).json({ error: 'Failed to process Excel file. Ensure it is a valid format.' });
     }
@@ -206,6 +243,8 @@ router.post('/commit-upload', async (req, res) => {
     try {
         await db.query('BEGIN');
         const uniqueTeachersMap = {};
+        
+        // Clean and prepare the incoming dataset
         for (const t of teachers) {
             if (!t.full_name) continue;
             const enforcedEmail = enforceBMUEmail(t.email, t.full_name);
@@ -219,21 +258,37 @@ router.post('/commit-upload', async (req, res) => {
 
         for (const t of Object.values(uniqueTeachersMap)) {
             const username = t.email.split('@')[0];
-            let tRes = await db.query('SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(username) = $2', [t.email, username]);
+            
+            // Match against Database (Name OR Email allows updating email addresses correctly)
+            let tRes = await db.query(
+                'SELECT id FROM teachers WHERE LOWER(email) = $1 OR LOWER(full_name) = $2', 
+                [t.email.toLowerCase(), t.full_name.toLowerCase()]
+            );
             
             if (tRes.rows.length > 0) {
+                // Perform Update (including email & username in case they were updated via Excel)
                 try {
-                    await db.query('UPDATE teachers SET full_name = $1, teacher_type = $2 WHERE id = $3', [t.full_name, t.teacher_type, tRes.rows[0].id]);
-                } catch(e) {}
+                    await db.query(
+                        'UPDATE teachers SET full_name = $1, email = $2, username = $3, teacher_type = $4 WHERE id = $5', 
+                        [t.full_name, t.email, username, t.teacher_type, tRes.rows[0].id]
+                    );
+                } catch(e) {
+                    console.error("Error updating existing teacher details:", e);
+                }
             } else {
+                // Perform Insert
                 try {
                     await db.query('INSERT INTO teachers (username, password, full_name, email, teacher_type) VALUES ($1, $2, $3, $4, $5)', 
                     [username, defaultPassword, t.full_name, t.email, t.teacher_type || 'Assistant Prof.']);
                 } catch (err) {
+                    // Conflict fallback (Usually hits if there's a unique username conflict but the name didn't match perfectly)
                     if (err.code === '23505') {
-                        let fallbackRes = await db.query('SELECT id FROM teachers WHERE LOWER(full_name) = $1', [t.full_name.toLowerCase()]);
+                        let fallbackRes = await db.query('SELECT id FROM teachers WHERE LOWER(username) = $1', [username]);
                         if(fallbackRes.rows.length > 0) {
-                            try { await db.query('UPDATE teachers SET email = $1, teacher_type = $2 WHERE id = $3', [t.email, t.teacher_type, fallbackRes.rows[0].id]); } catch(e){}
+                            try { 
+                                await db.query('UPDATE teachers SET full_name = $1, email = $2, teacher_type = $3 WHERE id = $4', 
+                                [t.full_name, t.email, t.teacher_type, fallbackRes.rows[0].id]); 
+                            } catch(e){}
                         }
                     } else throw err;
                 }
