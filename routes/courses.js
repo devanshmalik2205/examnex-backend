@@ -15,7 +15,8 @@ router.get('/', async (req, res) => {
                 category, 
                 credits,
                 ldp,
-                course_type
+                course_type,
+                exam_type
             FROM courses
             ORDER BY course_title ASC
         `;
@@ -107,7 +108,7 @@ router.get('/:id/details', async (req, res) => {
 
 // POST a new course
 router.post('/', async (req, res) => {
-    const { course_code, abbreviation, course_title, category, credits, ldp, course_type } = req.body;
+    const { course_code, abbreviation, course_title, category, credits, ldp, course_type, exam_type } = req.body;
     
     try {
         if (!course_title) {
@@ -115,10 +116,10 @@ router.post('/', async (req, res) => {
         }
 
         const { rows } = await db.query(
-            `INSERT INTO courses (course_code, abbreviation, course_title, category, credits, ldp, course_type) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7) 
+            `INSERT INTO courses (course_code, abbreviation, course_title, category, credits, ldp, course_type, exam_type) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
              RETURNING *`,
-            [course_code || null, abbreviation || null, course_title, category || null, credits ? parseFloat(credits) : null, ldp || null, course_type || 'regular']
+            [course_code || null, abbreviation || null, course_title, category || null, credits ? parseFloat(credits) : null, ldp || null, course_type || 'regular', exam_type || 'standard']
         );
         
         res.status(201).json(rows[0]);
@@ -134,15 +135,15 @@ router.post('/', async (req, res) => {
 // PUT (Edit) a course
 router.put('/:id', async (req, res) => {
     const { id } = req.params;
-    const { course_code, abbreviation, course_title, category, credits, ldp, course_type } = req.body;
+    const { course_code, abbreviation, course_title, category, credits, ldp, course_type, exam_type } = req.body;
 
     try {
         const { rows } = await db.query(
             `UPDATE courses 
-             SET course_code = $1, abbreviation = $2, course_title = $3, category = $4, credits = $5, ldp = $6, course_type = $7 
-             WHERE id = $8 
+             SET course_code = $1, abbreviation = $2, course_title = $3, category = $4, credits = $5, ldp = $6, course_type = $7, exam_type = $8
+             WHERE id = $9
              RETURNING *`,
-            [course_code || null, abbreviation || null, course_title, category || null, credits ? parseFloat(credits) : null, ldp || null, course_type || 'regular', id]
+            [course_code || null, abbreviation || null, course_title, category || null, credits ? parseFloat(credits) : null, ldp || null, course_type || 'regular', exam_type || 'standard', id]
         );
         
         if (rows.length === 0) return res.status(404).json({ error: 'Course not found' });
