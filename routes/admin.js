@@ -539,16 +539,31 @@ router.post('/schedule/generate-preview', async (req, res) => {
             // Pass 2 (Fallback): Find a slot where there is NO EXACT CLASH, but allow multiple exams on the SAME DAY
             if (!assignedSlot) {
                 for (const slot of availableSlots) {
-                    let hasClash = false;
+                    let hasExactClash = false;
+                    let conflictingBatches = [];
+
                     for (const batch of course.batches) {
                         if (batchSchedule[batch.timetable_id]?.slots.has(slot.id)) {
-                            hasClash = true;
+                            hasExactClash = true;
                             break;
                         }
+                        // Check if THIS specific section already has an exam mapped on this day
+                        if (batchSchedule[batch.timetable_id]?.days.has(slot.date)) {
+                            conflictingBatches.push(batch.name);
+                        }
                     }
-                    if (!hasClash) {
+
+                    // This prevents flagging independent sections doing the same exam as a conflict!
+                    if (!hasExactClash) {
                         assignedSlot = slot;
-                        clashes.push({ type: 'warning', message: `Batch density warning: Some sections taking ${course.course_code} have multiple exams scheduled on ${slot.date}.` });
+                        
+                        if (conflictingBatches.length > 0) {
+                            const uniqueBatches = [...new Set(conflictingBatches)];
+                            clashes.push({ 
+                                type: 'warning', 
+                                message: `Density Warning: ${uniqueBatches.join(', ')} have multiple different exams on ${slot.date} (Includes ${course.course_code}).` 
+                            });
+                        }
                         break;
                     }
                 }
