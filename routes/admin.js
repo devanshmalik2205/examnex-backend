@@ -457,4 +457,173 @@ router.post('/timetables/:id/commit', async (req, res) => {
     }
 });
 
+
+// @route   POST /api/admin/schedule/generate-preview
+// @desc    Automatically assigns subjects to available slots, detecting clashes
+router.post('/schedule/generate-preview', async (req, res) => {
+    const { startDate, endDate, slots } = req.body;
+    
+    if (!startDate || !endDate || !slots || slots.length === 0) {
+        return res.status(400).json({ error: 'Please provide valid start/end dates and at least one slot.' });
+    }
+
+    try {
+        // Fetch all courses assigned to any timetable (representing the subjects needing exams)
+        const mappingsQuery = `
+            SELECT c.id as course_id, c.course_code, c.course_title, 
+                   t.id as timetable_id, t.batch_year, t.stream, t.semester
+            FROM timetable_course_teachers tct
+            JOIN courses c ON tct.course_id = c.id
+            JOIN timetables t ON tct.timetable_id = t.id
+        `;
+        const { rows: mappings } = await db.query(mappingsQuery);
+
+        if (mappings.length === 0) {
+            return res.json({ schedule: [], clashes: [{ type: 'info', message: 'No courses found to schedule. Ensure timetables have subjects mapped.' }] });
+        }
+
+        // Group courses to see which batches take which course
+        const courseMap = {};
+        mappings.forEach(m => {
+            if (!courseMap[m.course_id]) {
+                courseMap[m.course_id] = { course_id: m.course_id, course_code: m.course_code, title: m.course_title, batches: [] };
+            }
+            // Prevent duplicate batch records for a single course
+            const existingBatch = courseMap[m.course_id].batches.find(b => b.timetable_id === m.timetable_id);
+            if (!existingBatch) {
+                courseMap[m.course_id].batches.push({ timetable_id: m.timetable_id, name: `${m.stream} - Sem ${m.semester} (${m.batch_year})` });
+            }
+        });
+
+        // Sort by difficulty (courses with more batches need to be scheduled first)
+        const courses = Object.values(courseMap).sort((a, b) => b.batches.length - a.batches.length);
+
+        // Generate all valid Datetime slots
+        const start = new Date(startDate);
+        const end = new Date(endDate);
+        const availableSlots = [];
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+            const dateStr = d.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+            slots.forEach(s => {
+                availableSlots.push({ date: dateStr, slotName: s.name, startTime: s.startTime, endTime: s.endTime, id: `${dateStr}-${s.name}` });
+            });
+        }
+
+        const schedule = [];
+        const clashes = [];
+        // Tracks occupied slots for a given batch. Format: { timetable_id: { slots: Set('date-slotName'), days: Set('date') } }
+        const batchSchedule = {}; 
+
+        // Core Generation Algorithm
+        courses.forEach(course => {
+            let assignedSlot = null;
+
+            // Pass 1: Try to find a perfectly clean slot (No clash in exact slot AND no exam on the same day for these batches)
+            for (const slot of availableSlots) {
+                let hasClash = false;
+                let sameDayConflict = false;
+
+                for (const batch of course.batches) {
+                    if (!batchSchedule[batch.timetable_id]) batchSchedule[batch.timetable_id] = { slots: new Set(), days: new Set() };
+                    
+                    if (batchSchedule[batch.timetable_id].slots.has(slot.id)) hasClash = true;
+                    if (batchSchedule[batch.timetable_id].days.has(slot.date)) sameDayConflict = true; 
+                }
+
+                if (!hasClash && !sameDayConflict) {
+                    assignedSlot = slot;
+                    break;
+                }
+            }
+
+            // Pass 2 (Fallback): Find a slot where there is NO EXACT CLASH, but allow multiple exams on the SAME DAY
+            if (!assignedSlot) {
+                for (const slot of availableSlots) {
+                    let hasClash = false;
+                    for (const batch of course.batches) {
+                        if (batchSchedule[batch.timetable_id]?.slots.has(slot.id)) {
+                            hasClash = true;
+                            break;
+                        }
+                    }
+                    if (!hasClash) {
+                        assignedSlot = slot;
+                        clashes.push({ type: 'warning', message: `Batch density warning: Some sections taking ${course.course_code} have multiple exams scheduled on ${slot.date}.` });
+                        break;
+                    }
+                }
+            }
+
+            // Record assignment or report hard clash
+            if (assignedSlot) {
+                schedule.push({
+                    id: `${course.course_code}-${assignedSlot.id}`,
+                    course_id: course.course_id,
+                    course_code: course.course_code,
+                    title: course.title,
+                    date: assignedSlot.date,
+                    slotName: assignedSlot.slotName,
+                    startTime: assignedSlot.startTime,
+                    endTime: assignedSlot.endTime,
+                    batches: course.batches
+                });
+                
+                // Mark this slot and day as occupied for all associated batches
+                course.batches.forEach(b => {
+                    batchSchedule[b.timetable_id].slots.add(assignedSlot.id);
+                    batchSchedule[b.timetable_id].days.add(assignedSlot.date);
+                });
+            } else {
+                clashes.push({ type: 'error', message: `Severe Clash: Failed to auto-schedule ${course.course_code} - not enough conflict-free slots available in the date range.` });
+            }
+        });
+
+        // Sort schedule chronologically before sending
+        schedule.sort((a, b) => new Date(`${a.date}T${a.startTime}`) - new Date(`${b.date}T${b.startTime}`));
+
+        res.json({ schedule, clashes });
+    } catch (err) {
+        console.error("Exam generation error:", err);
+        res.status(500).json({ error: 'Server error during schedule generation.' });
+    }
+});
+
+// @route   POST /api/admin/schedule/commit-generated
+// @desc    Saves the generated exam schedule into timetable_entries
+router.post('/schedule/commit-generated', async (req, res) => {
+    const { schedule } = req.body;
+    if (!schedule || schedule.length === 0) return res.status(400).json({ error: 'No schedule provided to commit.' });
+
+    try {
+        await db.query('BEGIN');
+        
+        for (const item of schedule) {
+            for (const batch of item.batches) {
+                // Insert into entries. We store the specific YYYY-MM-DD in day_of_week for exam differentiation
+                await db.query(`
+                    INSERT INTO timetable_entries 
+                    (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                `, [
+                    batch.timetable_id, 
+                    item.course_id, 
+                    item.date, 
+                    item.startTime, 
+                    item.endTime, 
+                    'TBA', 
+                    `${item.course_code} (Exam)`, 
+                    'EXAM'
+                ]);
+            }
+        }
+
+        await db.query('COMMIT');
+        res.json({ message: 'Exam schedule finalized and published to the database.' });
+    } catch (err) {
+        await db.query('ROLLBACK');
+        console.error("Exam commit error:", err);
+        res.status(500).json({ error: err.message || 'Failed to save generated schedule.' });
+    }
+});
+
 module.exports = router;
