@@ -469,12 +469,14 @@ router.post('/schedule/generate-preview', async (req, res) => {
 
     try {
         // Fetch all courses assigned to any timetable (representing the subjects needing exams)
+        // ONLY include standard exams, exclude projects and enrichments
         const mappingsQuery = `
             SELECT c.id as course_id, c.course_code, c.course_title, 
                    t.id as timetable_id, t.batch_year, t.stream, t.semester
             FROM timetable_course_teachers tct
             JOIN courses c ON tct.course_id = c.id
             JOIN timetables t ON tct.timetable_id = t.id
+            WHERE c.exam_type = 'standard' OR c.exam_type IS NULL
         `;
         const { rows: mappings } = await db.query(mappingsQuery);
 
