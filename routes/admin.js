@@ -191,7 +191,7 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
         const courses = new Map();
         const allocations = [];
         const entries = []; 
-        const minorCodes = []; // Track minor courses specifically
+        const minorCodes = []; 
 
         if (listHeaders['Course Code']) {
             for (let r = 0; r < rawData.length; r++) {
@@ -207,7 +207,6 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
 
                 if (abbr) abbrToCode[abbr] = cCode;
 
-                // Check if this course is categorized as a Minor
                 let isMinor = false;
                 if (
                     (cTitle && cTitle.toLowerCase().includes('minor')) || 
@@ -255,7 +254,6 @@ router.post('/timetables/:id/upload-preview', upload.single('file'), async (req,
                         return;
                     }
 
-                    // If cell just says "Minor", expand it into all extracted minor subjects so they link properly
                     if (cellVal.toUpperCase() === 'MINOR' || cellVal.toUpperCase().includes('MINOR (NANO TECH)')) {
                         if (minorCodes.length > 0) {
                             minorCodes.forEach(mCode => {
@@ -337,7 +335,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
-        // --- Courses ---
         const courseIdMap = {}; 
         const uniqueCoursesMap = {};
         for (const c of (courses || [])) {
@@ -366,7 +363,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
-        // --- Teachers ---
         const uniqueTeachersMap = {};
         for (const a of (allocations || [])) {
             if(!a.faculty_email || !a.faculty_name || !a.course_code) continue;
@@ -403,7 +399,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
             teacherIdMap[email] = teacherId;
         }
 
-        // --- Allocations (Apply to all target timetables) ---
         for (const tId of targetTimetableIds) {
             for (const a of (allocations || [])) {
                 if(!a.faculty_email || !a.faculty_name || !a.course_code) continue;
@@ -420,7 +415,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
             }
         }
 
-        // --- Entries (Apply to all target timetables) ---
         if (entries && entries.length > 0) {
             for (const tId of targetTimetableIds) {
                 for (const e of entries) {
@@ -457,9 +451,6 @@ router.post('/timetables/:id/commit', async (req, res) => {
     }
 });
 
-
-// @route   POST /api/admin/schedule/generate-preview
-// @desc    Automatically assigns subjects to available slots, detecting clashes
 router.post('/schedule/generate-preview', async (req, res) => {
     const { startDate, endDate, slots } = req.body;
     
@@ -468,8 +459,6 @@ router.post('/schedule/generate-preview', async (req, res) => {
     }
 
     try {
-        // Fetch all courses assigned to any timetable (representing the subjects needing exams)
-        // ONLY include standard exams, exclude projects and enrichments
         const mappingsQuery = `
             SELECT c.id as course_id, c.course_code, c.course_title, 
                    t.id as timetable_id, t.batch_year, t.stream, t.semester
@@ -484,28 +473,24 @@ router.post('/schedule/generate-preview', async (req, res) => {
             return res.json({ schedule: [], clashes: [{ type: 'info', message: 'No courses found to schedule. Ensure timetables have subjects mapped.' }] });
         }
 
-        // Group courses to see which batches take which course
         const courseMap = {};
         mappings.forEach(m => {
             if (!courseMap[m.course_id]) {
                 courseMap[m.course_id] = { course_id: m.course_id, course_code: m.course_code, title: m.course_title, batches: [] };
             }
-            // Prevent duplicate batch records for a single course
             const existingBatch = courseMap[m.course_id].batches.find(b => b.timetable_id === m.timetable_id);
             if (!existingBatch) {
                 courseMap[m.course_id].batches.push({ timetable_id: m.timetable_id, name: `${m.stream} - Sem ${m.semester} (${m.batch_year})` });
             }
         });
 
-        // Sort by difficulty (courses with more batches need to be scheduled first)
         const courses = Object.values(courseMap).sort((a, b) => b.batches.length - a.batches.length);
 
-        // Generate all valid Datetime slots
         const start = new Date(startDate);
         const end = new Date(endDate);
         const availableSlots = [];
         for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-            const dateStr = d.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+            const dateStr = d.toISOString().split('T')[0]; 
             slots.forEach(s => {
                 availableSlots.push({ date: dateStr, slotName: s.name, startTime: s.startTime, endTime: s.endTime, id: `${dateStr}-${s.name}` });
             });
@@ -513,14 +498,11 @@ router.post('/schedule/generate-preview', async (req, res) => {
 
         const schedule = [];
         const clashes = [];
-        // Tracks occupied slots for a given batch. Format: { timetable_id: { slots: Set('date-slotName'), days: Set('date') } }
         const batchSchedule = {}; 
 
-        // Core Generation Algorithm
         courses.forEach(course => {
             let assignedSlot = null;
 
-            // Pass 1: Try to find a perfectly clean slot (No clash in exact slot AND no exam on the same day for these batches)
             for (const slot of availableSlots) {
                 let hasClash = false;
                 let sameDayConflict = false;
@@ -538,7 +520,6 @@ router.post('/schedule/generate-preview', async (req, res) => {
                 }
             }
 
-            // Pass 2 (Fallback): Find a slot where there is NO EXACT CLASH, but allow multiple exams on the SAME DAY
             if (!assignedSlot) {
                 for (const slot of availableSlots) {
                     let hasExactClash = false;
@@ -549,16 +530,13 @@ router.post('/schedule/generate-preview', async (req, res) => {
                             hasExactClash = true;
                             break;
                         }
-                        // Check if THIS specific section already has an exam mapped on this day
                         if (batchSchedule[batch.timetable_id]?.days.has(slot.date)) {
                             conflictingBatches.push(batch.name);
                         }
                     }
 
-                    // This prevents flagging independent sections doing the same exam as a conflict!
                     if (!hasExactClash) {
                         assignedSlot = slot;
-                        
                         if (conflictingBatches.length > 0) {
                             const uniqueBatches = [...new Set(conflictingBatches)];
                             clashes.push({ 
@@ -571,7 +549,6 @@ router.post('/schedule/generate-preview', async (req, res) => {
                 }
             }
 
-            // Record assignment or report hard clash
             if (assignedSlot) {
                 schedule.push({
                     id: `${course.course_code}-${assignedSlot.id}`,
@@ -585,7 +562,6 @@ router.post('/schedule/generate-preview', async (req, res) => {
                     batches: course.batches
                 });
                 
-                // Mark this slot and day as occupied for all associated batches
                 course.batches.forEach(b => {
                     batchSchedule[b.timetable_id].slots.add(assignedSlot.id);
                     batchSchedule[b.timetable_id].days.add(assignedSlot.date);
@@ -595,51 +571,54 @@ router.post('/schedule/generate-preview', async (req, res) => {
             }
         });
 
-        // Sort schedule chronologically before sending
         schedule.sort((a, b) => new Date(`${a.date}T${a.startTime}`) - new Date(`${b.date}T${b.startTime}`));
 
         res.json({ schedule, clashes });
     } catch (err) {
-        console.error("Exam generation error:", err);
         res.status(500).json({ error: 'Server error during schedule generation.' });
     }
 });
 
-// @route   POST /api/admin/schedule/commit-generated
-// @desc    Saves the generated exam schedule into timetable_entries
 router.post('/schedule/commit-generated', async (req, res) => {
     const { schedule } = req.body;
     if (!schedule || schedule.length === 0) return res.status(400).json({ error: 'No schedule provided to commit.' });
 
     try {
         await db.query('BEGIN');
-        
         for (const item of schedule) {
             for (const batch of item.batches) {
-                // Insert into entries. We store the specific YYYY-MM-DD in day_of_week for exam differentiation
                 await db.query(`
                     INSERT INTO timetable_entries 
                     (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type) 
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 `, [
-                    batch.timetable_id, 
-                    item.course_id, 
-                    item.date, 
-                    item.startTime, 
-                    item.endTime, 
-                    'TBA', 
-                    `${item.course_code} (Exam)`, 
-                    'EXAM'
+                    batch.timetable_id, item.course_id, item.date, item.startTime, item.endTime, 'TBA', `${item.course_code} (Exam)`, 'EXAM'
                 ]);
             }
         }
-
         await db.query('COMMIT');
         res.json({ message: 'Exam schedule finalized and published to the database.' });
     } catch (err) {
         await db.query('ROLLBACK');
-        console.error("Exam commit error:", err);
         res.status(500).json({ error: err.message || 'Failed to save generated schedule.' });
+    }
+});
+
+router.get('/rooms', async (req, res) => {
+    try {
+        const { rows } = await db.query('SELECT * FROM rooms ORDER BY capacity DESC, room_name ASC');
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Server error fetching rooms' });
+    }
+});
+
+router.get('/room-structures', async (req, res) => {
+    try {
+        const { rows } = await db.query('SELECT * FROM room_seat_structure WHERE is_usable = true ORDER BY room_id, row_number, column_number');
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Server error fetching room structures' });
     }
 });
 
