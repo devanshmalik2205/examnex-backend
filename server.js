@@ -7,6 +7,7 @@ const adminRoutes = require('./routes/admin');
 const teacherRoutes = require('./routes/teachers');
 const studentRoutes = require('./routes/students');
 const courseRoutes = require('./routes/courses'); // <-- Added courses route
+const examRequirementRoutes = require('./routes/examRequirements');
 
 const app = express();
 
@@ -23,6 +24,8 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/admin/teachers', teacherRoutes);
 app.use('/api/admin/students', studentRoutes);
 app.use('/api/admin/courses', courseRoutes); // <-- Mounted courses route
+app.use('/api/exam-requirements', examRequirementRoutes);
+app.use('/api/admin/exam-requirements', examRequirementRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
