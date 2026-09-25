@@ -2,6 +2,18 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
 
+// Helper to drop strict constraints to allow new values like "MCQ Quiz" dynamically
+const adjustSchemaConstraints = async () => {
+    try {
+        await db.query('ALTER TABLE exam_requirements DROP CONSTRAINT IF EXISTS exam_requirements_exam_mode_check;');
+        await db.query('ALTER TABLE exam_requirements DROP CONSTRAINT IF EXISTS chk_exam_mode;');
+        // Cast to VARCHAR safely in case it was created as an ENUM type previously
+        await db.query('ALTER TABLE exam_requirements ALTER COLUMN exam_mode TYPE VARCHAR(255) USING exam_mode::text;');
+    } catch (e) {
+        // Ignore if constraints don't exist or column is already correctly typed
+    }
+};
+
 // GET all exam requirements, with optional filter by coordinator
 router.get('/', async (req, res) => {
     try {
@@ -29,6 +41,9 @@ router.get('/', async (req, res) => {
 
 // POST /sync - Bulk sync all rows from the Live Excel sheet
 router.post('/sync', async (req, res) => {
+    // Ensure the database accepts new categories like "MCQ Quiz" before inserting
+    await adjustSchemaConstraints();
+
     const { rows, updateCourses } = req.body;
     if (!Array.isArray(rows)) {
         return res.status(400).json({ error: 'Invalid payload: rows array required' });
@@ -57,7 +72,10 @@ router.post('/sync', async (req, res) => {
                 is_reexam
             } = row;
 
-            if (id && typeof id === 'number' && id > 0) {
+            // FIX: Safely parse ID from frontend to prevent false inserts when ID is a string ("1" vs 1)
+            const numericId = parseInt(id, 10);
+
+            if (numericId && !isNaN(numericId) && numericId > 0) {
                 const updateRes = await db.query(`
                     UPDATE exam_requirements
                     SET coordinator_name = $1,
@@ -85,17 +103,18 @@ router.post('/sync', async (req, res) => {
                     course_code || null,
                     is_conducted || 'Yes',
                     course_type || 'Regular',
-                    exam_mode || 'Written',
+                    exam_mode || 'Written', // Will now accept "MCQ Quiz"
                     exam_weightage !== undefined && exam_weightage !== null ? exam_weightage.toString() : '20',
                     duration || '1',
                     remark || '',
                     Boolean(is_reexam),
-                    id
+                    numericId
                 ]);
 
                 if (updateRes.rows.length > 0) {
                     savedRows.push(updateRes.rows[0]);
                 } else {
+                    // Fallback to insert if the ID somehow doesn't exist in the DB
                     const insertRes = await db.query(`
                         INSERT INTO exam_requirements
                         (coordinator_name, coordinator_id, coordinator_email, semester, course_name, course_code, is_conducted, course_type, exam_mode, exam_weightage, duration, remark, is_reexam)
@@ -170,6 +189,8 @@ router.post('/sync', async (req, res) => {
 
 // POST single row
 router.post('/', async (req, res) => {
+    await adjustSchemaConstraints();
+    
     const {
         coordinator_name,
         coordinator_id,
