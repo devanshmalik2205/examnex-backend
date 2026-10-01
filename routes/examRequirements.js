@@ -2,23 +2,20 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
 
-// Helper to drop strict constraints to allow new values like "MCQ Quiz" dynamically
 const adjustSchemaConstraints = async () => {
     try {
         await db.query('ALTER TABLE exam_requirements DROP CONSTRAINT IF EXISTS exam_requirements_exam_mode_check;');
         await db.query('ALTER TABLE exam_requirements DROP CONSTRAINT IF EXISTS chk_exam_mode;');
-        // Cast to VARCHAR safely in case it was created as an ENUM type previously
         await db.query('ALTER TABLE exam_requirements ALTER COLUMN exam_mode TYPE VARCHAR(255) USING exam_mode::text;');
     } catch (e) {
-        // Ignore if constraints don't exist or column is already correctly typed
+        // Ignore if constraints don't exist
     }
 };
 
-// GET all exam requirements + examples, with optional filter by coordinator
 router.get('/', async (req, res) => {
     try {
         const { coordinator_name, coordinator_id } = req.query;
-        let query = 'SELECT *, false as is_example FROM exam_requirements';
+        let query = 'SELECT * FROM exam_requirements';
         let params = [];
 
         if (coordinator_id) {
@@ -31,25 +28,19 @@ router.get('/', async (req, res) => {
             query += ' ORDER BY id ASC';
         }
 
-        const { rows: realRows } = await db.query(query, params);
-        
-        // Fetch the 4 view-only example rows from our new table
-        const { rows: exampleRows } = await db.query('SELECT *, true as is_example FROM exam_requirements_examples ORDER BY id ASC');
-
-        // Prepend examples so they appear at the top (Rows 2 to 5 on the frontend grid)
-        res.json([...exampleRows, ...realRows]);
+        const { rows } = await db.query(query, params);
+        res.json(rows);
     } catch (err) {
         console.error('Error fetching exam requirements:', err);
         res.status(500).json({ error: 'Failed to fetch exam requirements' });
     }
 });
 
-// POST /sync - Bulk sync all rows from the Live Excel sheet/Frontend
 router.post('/sync', async (req, res) => {
     await adjustSchemaConstraints();
 
-    // Now accepting deleted_ids from the frontend to fix the resurrection bug
-    const { rows, updateCourses, deleted_ids } = req.body;
+    // Now accepting deleted_ids from the frontend to process hard deletions
+    const { rows, deleted_ids, updateCourses } = req.body;
     
     if (!Array.isArray(rows)) {
         return res.status(400).json({ error: 'Invalid payload: rows array required' });
@@ -58,7 +49,7 @@ router.post('/sync', async (req, res) => {
     try {
         await db.query('BEGIN');
 
-        // 1. Process deletions FIRST so they don't come back
+        // 1. Process Deletions FIRST
         if (deleted_ids && Array.isArray(deleted_ids) && deleted_ids.length > 0) {
             const validDeletedIds = deleted_ids.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
             if (validDeletedIds.length > 0) {
@@ -70,24 +61,14 @@ router.post('/sync', async (req, res) => {
 
         // 2. Process Inserts and Updates
         for (const row of rows) {
-            // SAFEGUARD: Never process or save the example rows into the main table
+            // SAFEGUARD: Never process the hardcoded frontend example rows
             if (row.is_example) continue;
 
             const {
-                id,
-                coordinator_name,
-                coordinator_id,
-                coordinator_email,
-                semester,
-                course_name,
-                course_code,
-                is_conducted,
-                course_type,
-                exam_mode,
-                exam_weightage,
-                duration,
-                remark,
-                is_reexam
+                id, coordinator_name, coordinator_id, coordinator_email,
+                semester, course_name, course_code, is_conducted,
+                course_type, exam_mode, exam_weightage, duration,
+                remark, is_reexam
             } = row;
 
             const numericId = parseInt(id, 10);
@@ -163,7 +144,6 @@ router.post('/sync', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-    // Single insert remains the same
     await adjustSchemaConstraints();
     const body = req.body;
     try {
