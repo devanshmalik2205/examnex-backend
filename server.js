@@ -11,6 +11,7 @@ const studentRoutes = require('./routes/students');
 const courseRoutes = require('./routes/courses'); 
 const examRequirementRoutes = require('./routes/examRequirements');
 const settingsRoutes = require('./routes/settings'); // <-- Added settings route for editing window
+const masterImporterRoutes = require('./routes/masterImporter'); // <-- Added master importer route
 
 const app = express();
 
@@ -42,6 +43,7 @@ app.use('/api/admin/courses', courseRoutes);
 app.use('/api/exam-requirements', examRequirementRoutes);
 app.use('/api/admin/exam-requirements', examRequirementRoutes);
 app.use('/api/settings', settingsRoutes); // <-- Mounted settings route
+app.use('/api/master-importer', masterImporterRoutes); // <-- Mounted master importer route
 
 // Socket.IO Real-Time Editing Logic
 io.on('connection', (socket) => {
