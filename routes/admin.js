@@ -587,12 +587,17 @@ router.post('/schedule/commit-generated', async (req, res) => {
         await db.query('BEGIN');
         for (const item of schedule) {
             for (const batch of item.batches) {
+                // Intercept generic string IDs and convert them to NULL to avoid Postgres bigint syntax errors
+                const validTimetableId = String(batch.timetable_id).startsWith('generic-') 
+                    ? null 
+                    : batch.timetable_id;
+                
                 await db.query(`
                     INSERT INTO timetable_entries 
                     (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type) 
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 `, [
-                    batch.timetable_id, item.course_id, item.date, item.startTime, item.endTime, 'TBA', `${item.course_code} (Exam)`, 'EXAM'
+                    validTimetableId, item.course_id, item.date, item.startTime, item.endTime, 'TBA', `${item.course_code} (Exam)`, 'EXAM'
                 ]);
             }
         }
