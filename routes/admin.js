@@ -604,6 +604,18 @@ router.post('/schedule/commit-generated', async (req, res) => {
     }
 });
 
+router.delete('/schedule/clear', async (req, res) => {
+    try {
+        await db.query('BEGIN');
+        await db.query(`DELETE FROM timetable_entries WHERE entry_type = 'EXAM'`);
+        await db.query('COMMIT');
+        res.json({ message: 'Exam schedule cleared successfully.' });
+    } catch (err) {
+        await db.query('ROLLBACK');
+        res.status(500).json({ error: 'Failed to clear exam schedule.' });
+    }
+});
+
 router.get('/rooms', async (req, res) => {
     try {
         const { rows } = await db.query('SELECT * FROM rooms ORDER BY capacity DESC, room_name ASC');
