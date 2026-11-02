@@ -35,16 +35,14 @@ const linkStudentToTimetable = async (studentId, registration_no, stream) => {
 
 router.get('/', async (req, res) => {
     try {
-        const { rows } = await db.query(
-            `
-                SELECT 
-                    s.id, s.registration_no, s.stream, s.username, s.email,
-                    sap.batch_year, sap.branch, sap.section, sap.preference_1, sap.preference_2
-                FROM students s
-                LEFT JOIN student_academic_profiles sap ON s.id = sap.student_id
-                ORDER BY s.registration_no ASC
-            `
-        );
+        const { rows } = await db.query(`
+            SELECT 
+                s.id, s.registration_no, s.stream, s.username, s.email,
+                sap.batch_year, sap.branch, sap.section, sap.preference_1, sap.preference_2
+            FROM students s
+            LEFT JOIN student_academic_profiles sap ON s.id = sap.student_id
+            ORDER BY s.registration_no ASC
+        `);
         res.json(rows);
     } catch (err) {
         res.status(500).json({ error: 'Server error fetching students' });

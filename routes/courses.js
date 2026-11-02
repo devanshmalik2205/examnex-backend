@@ -120,8 +120,8 @@ router.post('/', async (req, res) => {
 
         const { rows } = await db.query(
             `INSERT INTO courses (course_code, abbreviation, course_title, category, sub_category, credits, ldp, schedule, remarks, course_type, exam_type) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
-            RETURNING *`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
+             RETURNING *`,
             [course_code || null, abbreviation || null, course_title, category || null, sub_category || null, credits ? parseFloat(credits) : null, ldp || null, schedule || null, remarks || null, course_type || 'regular', exam_type || 'standard']
         );
         
@@ -138,14 +138,14 @@ router.post('/', async (req, res) => {
 // PUT (Edit) a course
 router.put('/:id', async (req, res) => {
     const { id } = req.params;
-    const { course_code, abbreviation, course_title, category, credits, ldp, course_type, exam_type } = req.body;
+    const { course_code, abbreviation, course_title, category, sub_category, credits, ldp, schedule, remarks, course_type, exam_type } = req.body;
 
     try {
         const { rows } = await db.query(
             `UPDATE courses 
-            SET course_code = $1, abbreviation = $2, course_title = $3, category = $4, sub_category = $5, credits = $6, ldp = $7, schedule = $8, remarks = $9, course_type = $10, exam_type = $11
-            WHERE id = $12
-            RETURNING *`,
+             SET course_code = $1, abbreviation = $2, course_title = $3, category = $4, sub_category = $5, credits = $6, ldp = $7, schedule = $8, remarks = $9, course_type = $10, exam_type = $11
+             WHERE id = $12
+             RETURNING *`,
             [course_code || null, abbreviation || null, course_title, category || null, sub_category || null, credits ? parseFloat(credits) : null, ldp || null, schedule || null, remarks || null, course_type || 'regular', exam_type || 'standard', id]
         );
         
