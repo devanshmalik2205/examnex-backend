@@ -15,6 +15,10 @@ const masterImporterRoutes = require('./routes/masterImporter'); // <-- Added ma
 
 const app = express();
 
+// INCREASE THE LIMIT HERE (e.g., to 50mb)
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
 // Create HTTP server for Socket.IO
 const server = http.createServer(app);
 
