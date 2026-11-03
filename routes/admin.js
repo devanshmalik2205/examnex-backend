@@ -647,4 +647,49 @@ router.get('/room-structures', async (req, res) => {
     }
 });
 
+router.get('/exam-assigner/data', async (req, res) => {
+    try {
+        // Fetch published exams mapped to valid timetables
+        const examsQuery = `
+            SELECT 
+                te.day_of_week as date, 
+                te.start_time, 
+                te.end_time, 
+                te.room, 
+                c.course_code, 
+                c.course_title, 
+                t.stream, 
+                t.semester
+            FROM timetable_entries te
+            JOIN courses c ON te.course_id = c.id
+            JOIN timetables t ON te.timetable_id = t.id
+            WHERE te.entry_type = 'EXAM'
+        `;
+        const { rows: exams } = await db.query(examsQuery);
+
+        if (exams.length === 0) {
+            return res.status(404).json({ error: 'No generated exams found' });
+        }
+
+        // Fetch all teachers and list the courses they are allocated to teach
+        const teachersQuery = `
+            SELECT 
+                t.id, 
+                t.full_name, 
+                t.teacher_type, 
+                COALESCE(json_agg(DISTINCT c.course_code) FILTER (WHERE c.course_code IS NOT NULL), '[]') as courses_taught
+            FROM teachers t
+            LEFT JOIN timetable_course_teachers tct ON t.id = tct.teacher_id
+            LEFT JOIN courses c ON tct.course_id = c.id
+            GROUP BY t.id
+        `;
+        const { rows: teachers } = await db.query(teachersQuery);
+
+        res.json({ exams, teachers });
+    } catch (err) {
+        console.error("Error fetching exam assigner data:", err);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
 module.exports = router;
