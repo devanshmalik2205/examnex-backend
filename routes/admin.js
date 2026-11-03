@@ -585,24 +585,32 @@ router.post('/schedule/commit-generated', async (req, res) => {
 
     try {
         await db.query('BEGIN');
+        let skippedGenerics = 0;
+
         for (const item of schedule) {
             for (const batch of item.batches) {
-                // Intercept generic string IDs and convert them to NULL to avoid Postgres bigint syntax errors
-                const validTimetableId = String(batch.timetable_id).startsWith('generic-') 
-                    ? null 
-                    : batch.timetable_id;
+                // If it's a generic placeholder, skip saving it to the DB because it has no valid timetable_id
+                if (String(batch.timetable_id).startsWith('generic-')) {
+                    skippedGenerics++;
+                    continue; 
+                }
                 
                 await db.query(`
                     INSERT INTO timetable_entries 
                     (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type) 
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 `, [
-                    validTimetableId, item.course_id, item.date, item.startTime, item.endTime, 'TBA', `${item.course_code} (Exam)`, 'EXAM'
+                    batch.timetable_id, item.course_id, item.date, item.startTime, item.endTime, 'TBA', `${item.course_code} (Exam)`, 'EXAM'
                 ]);
             }
         }
         await db.query('COMMIT');
-        res.json({ message: 'Exam schedule finalized and published to the database.' });
+        
+        let msg = 'Exam schedule finalized and published to the database.';
+        if (skippedGenerics > 0) {
+            msg += ` (Note: ${skippedGenerics} placeholder batches were skipped because they aren't mapped to active timetables).`;
+        }
+        res.json({ message: msg });
     } catch (err) {
         await db.query('ROLLBACK');
         res.status(500).json({ error: err.message || 'Failed to save generated schedule.' });
