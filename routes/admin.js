@@ -595,12 +595,15 @@ router.post('/schedule/commit-generated', async (req, res) => {
                     continue; 
                 }
                 
+                // Use the permanently assigned physical room if available, otherwise fallback to TBA
+                const finalRoom = item.assignedRoom || 'TBA';
+
                 await db.query(`
                     INSERT INTO timetable_entries 
                     (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type) 
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 `, [
-                    batch.timetable_id, item.course_id, item.date, item.startTime, item.endTime, 'TBA', `${item.course_code} (Exam)`, 'EXAM'
+                    batch.timetable_id, item.course_id, item.date, item.startTime, item.endTime, finalRoom, `${item.course_code} (Exam)`, 'EXAM'
                 ]);
             }
         }
@@ -649,46 +652,48 @@ router.get('/room-structures', async (req, res) => {
 
 router.get('/exam-assigner/data', async (req, res) => {
     try {
-        // Fetch published exams mapped to valid timetables
         const examsQuery = `
             SELECT 
+                te.id, 
                 te.day_of_week as date, 
                 te.start_time, 
                 te.end_time, 
-                te.room, 
+                COALESCE(te.room, 'TBA') as room,
                 c.course_code, 
                 c.course_title, 
+                t.batch_year, 
                 t.stream, 
                 t.semester
             FROM timetable_entries te
-            JOIN courses c ON te.course_id = c.id
-            JOIN timetables t ON te.timetable_id = t.id
+            LEFT JOIN courses c ON te.course_id = c.id
+            LEFT JOIN timetables t ON te.timetable_id = t.id
             WHERE te.entry_type = 'EXAM'
+            ORDER BY te.day_of_week, te.start_time, te.room
         `;
         const { rows: exams } = await db.query(examsQuery);
 
-        if (exams.length === 0) {
-            return res.status(404).json({ error: 'No generated exams found' });
-        }
-
-        // Fetch all teachers and list the courses they are allocated to teach
         const teachersQuery = `
             SELECT 
                 t.id, 
                 t.full_name, 
                 t.teacher_type, 
-                COALESCE(json_agg(DISTINCT c.course_code) FILTER (WHERE c.course_code IS NOT NULL), '[]') as courses_taught
+                t.department,
+                COALESCE(
+                    json_agg(DISTINCT c.course_code) FILTER (WHERE c.course_code IS NOT NULL), 
+                    '[]'::json
+                ) as courses_taught
             FROM teachers t
             LEFT JOIN timetable_course_teachers tct ON t.id = tct.teacher_id
             LEFT JOIN courses c ON tct.course_id = c.id
             GROUP BY t.id
+            ORDER BY t.full_name ASC
         `;
         const { rows: teachers } = await db.query(teachersQuery);
 
         res.json({ exams, teachers });
     } catch (err) {
-        console.error("Error fetching exam assigner data:", err);
-        res.status(500).json({ error: 'Internal Server Error' });
+        console.error('Error fetching invigilation assignment data:', err);
+        res.status(500).json({ error: 'Server error fetching invigilation assignment data' });
     }
 });
 
