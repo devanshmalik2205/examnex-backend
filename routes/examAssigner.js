@@ -28,7 +28,7 @@ router.get('/data', async (req, res) => {
         const { rows: exams } = await db.query(examsQuery);
 
         // Fetch all teachers, their designations, and all courses they teach
-        const teachersQuery = `
+            const teachersQuery = `
             SELECT 
                 t.id, 
                 t.full_name, 
@@ -36,7 +36,7 @@ router.get('/data', async (req, res) => {
                 t.department,
                 COALESCE(
                     json_agg(DISTINCT c.course_code) FILTER (WHERE c.course_code IS NOT NULL), 
-                    '[]'
+                    '[]'::json
                 ) as courses_taught
             FROM teachers t
             LEFT JOIN timetable_course_teachers tct ON t.id = tct.teacher_id

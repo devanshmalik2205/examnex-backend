@@ -715,14 +715,15 @@ router.get('/exam-assigner/data', async (req, res) => {
         `;
         const { rows: exams } = await db.query(examsQuery);
 
-        const teachersQuery = `
+            const teachersQuery = `
             SELECT 
                 t.id, 
                 t.full_name, 
                 t.teacher_type, 
+                t.department,
                 COALESCE(
                     json_agg(DISTINCT c.course_code) FILTER (WHERE c.course_code IS NOT NULL), 
-                    '[]'
+                    '[]'::json
                 ) as courses_taught
             FROM teachers t
             LEFT JOIN timetable_course_teachers tct ON t.id = tct.teacher_id
