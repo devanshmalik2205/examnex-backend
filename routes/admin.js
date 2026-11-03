@@ -70,6 +70,15 @@ router.get('/stats', async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Internal Server Error' }); }
 });
 
+router.get('/courses', async (req, res) => {
+    try {
+        const { rows } = await db.query('SELECT * FROM courses');
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Server error fetching courses' });
+    }
+});
+
 router.get('/timetables', async (req, res) => {
     try {
         const { rows } = await db.query(`SELECT id, batch_year, stream, semester, source_sheet FROM timetables ORDER BY batch_year DESC, stream ASC, semester ASC;`);
@@ -614,7 +623,7 @@ router.post('/schedule/commit-generated', async (req, res) => {
                     (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type) 
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 `, [
-                    tid, item.course_id, item.date, item.startTime, item.endTime, finalRoom, `${item.course_code} (Exam)`, 'EXAM'
+                    tid, item.course_id || null, item.date, item.startTime, item.endTime, finalRoom, `${item.course_code} (Exam)`, 'EXAM'
                 ]);
             }
         }
