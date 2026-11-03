@@ -585,14 +585,25 @@ router.post('/schedule/commit-generated', async (req, res) => {
 
     try {
         await db.query('BEGIN');
-        let skippedGenerics = 0;
 
         for (const item of schedule) {
             for (const batch of item.batches) {
-                // If it's a generic placeholder, skip saving it to the DB because it has no valid timetable_id
-                if (String(batch.timetable_id).startsWith('generic-')) {
-                    skippedGenerics++;
-                    continue; 
+                let tid = batch.timetable_id;
+                
+                // Handle placeholder generic timetables by creating a real database entry for them to satisfy the NOT NULL constraint!
+                if (String(tid).startsWith('generic-')) {
+                    const semMatch = batch.name.match(/Sem\s+(\d+)/);
+                    const sem = semMatch ? semMatch[1] : '1';
+                    
+                    let genericRes = await db.query(`SELECT id FROM timetables WHERE batch_year = 2099 AND stream = 'GENERIC' AND semester = $1`, [sem]);
+                    if (genericRes.rows.length === 0) {
+                        genericRes = await db.query(`
+                            INSERT INTO timetables (batch_year, stream, semester)
+                            VALUES (2099, 'GENERIC', $1)
+                            RETURNING id
+                        `, [sem]);
+                    }
+                    tid = genericRes.rows[0].id;
                 }
                 
                 // Use the permanently assigned physical room if available, otherwise fallback to TBA
@@ -603,17 +614,12 @@ router.post('/schedule/commit-generated', async (req, res) => {
                     (timetable_id, course_id, day_of_week, start_time, end_time, room, raw_entry, entry_type) 
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 `, [
-                    batch.timetable_id, item.course_id, item.date, item.startTime, item.endTime, finalRoom, `${item.course_code} (Exam)`, 'EXAM'
+                    tid, item.course_id, item.date, item.startTime, item.endTime, finalRoom, `${item.course_code} (Exam)`, 'EXAM'
                 ]);
             }
         }
         await db.query('COMMIT');
-        
-        let msg = 'Exam schedule finalized and published to the database.';
-        if (skippedGenerics > 0) {
-            msg += ` (Note: ${skippedGenerics} placeholder batches were skipped because they aren't mapped to active timetables).`;
-        }
-        res.json({ message: msg });
+        res.json({ message: 'Exam schedule finalized and published to the database.' });
     } catch (err) {
         await db.query('ROLLBACK');
         res.status(500).json({ error: err.message || 'Failed to save generated schedule.' });
