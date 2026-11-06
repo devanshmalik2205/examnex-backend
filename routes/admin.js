@@ -469,7 +469,7 @@ router.post('/schedule/generate-preview', async (req, res) => {
 
     try {
         const mappingsQuery = `
-            SELECT c.id as course_id, c.course_code, c.course_title, 
+            SELECT c.id as course_id, c.course_code, c.course_title, c.course_type,
                    t.id as timetable_id, t.batch_year, t.stream, t.semester
             FROM timetable_course_teachers tct
             JOIN courses c ON tct.course_id = c.id
@@ -485,7 +485,13 @@ router.post('/schedule/generate-preview', async (req, res) => {
         const courseMap = {};
         mappings.forEach(m => {
             if (!courseMap[m.course_id]) {
-                courseMap[m.course_id] = { course_id: m.course_id, course_code: m.course_code, title: m.course_title, batches: [] };
+                courseMap[m.course_id] = { 
+                    course_id: m.course_id, 
+                    course_code: m.course_code, 
+                    title: m.course_title, 
+                    course_type: m.course_type, 
+                    batches: [] 
+                };
             }
             const existingBatch = courseMap[m.course_id].batches.find(b => b.timetable_id === m.timetable_id);
             if (!existingBatch) {
@@ -564,6 +570,7 @@ router.post('/schedule/generate-preview', async (req, res) => {
                     course_id: course.course_id,
                     course_code: course.course_code,
                     title: course.title,
+                    course_type: course.course_type,
                     date: assignedSlot.date,
                     slotName: assignedSlot.slotName,
                     startTime: assignedSlot.startTime,
@@ -599,7 +606,6 @@ router.post('/schedule/commit-generated', async (req, res) => {
             for (const batch of item.batches) {
                 let tid = batch.timetable_id;
                 
-                // Handle placeholder generic timetables by creating a real database entry for them to satisfy the NOT NULL constraint!
                 if (String(tid).startsWith('generic-')) {
                     const semMatch = batch.name.match(/Sem\s+(\d+)/);
                     const sem = semMatch ? semMatch[1] : '1';
@@ -615,7 +621,6 @@ router.post('/schedule/commit-generated', async (req, res) => {
                     tid = genericRes.rows[0].id;
                 }
                 
-                // Use the permanently assigned physical room if available, otherwise fallback to TBA
                 const finalRoom = item.assignedRoom || 'TBA';
 
                 await db.query(`
@@ -714,9 +719,27 @@ router.get('/exam-assigner/data', async (req, res) => {
 
 router.get('/students', async (req, res) => {
     try {
-        const { rows } = await db.query('SELECT * FROM students');
+        const { rows } = await db.query(`
+            SELECT 
+                s.*,
+                sap.batch_year, 
+                sap.branch, 
+                sap.section,
+                COALESCE(
+                    (
+                        SELECT json_agg(UPPER(ac.canonical_code))
+                        FROM student_course_selections scs
+                        JOIN academic_courses ac ON scs.academic_course_id = ac.id
+                        WHERE scs.student_id = s.id AND scs.selection_status = 'Y'
+                    ), 
+                    '[]'::json
+                ) as selected_courses
+            FROM students s
+            LEFT JOIN student_academic_profiles sap ON s.id = sap.student_id
+        `);
         res.json(rows);
     } catch (err) {
+        console.error('Server error fetching students with selections:', err);
         res.status(500).json({ error: 'Server error fetching students' });
     }
 });
