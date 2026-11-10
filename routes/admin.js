@@ -723,8 +723,9 @@ router.get('/students', async (req, res) => {
             SELECT 
                 s.*,
                 COALESCE(
-                    (SELECT MAX(batch_year) FROM student_course_selections WHERE student_id = s.id),
-                    sap.batch_year
+                    s.batch_year,
+                    sap.batch_year,
+                    (SELECT MAX(batch_year) FROM student_course_selections WHERE student_id = s.id)
                 ) as batch_year, 
                 sap.branch, 
                 sap.section,
